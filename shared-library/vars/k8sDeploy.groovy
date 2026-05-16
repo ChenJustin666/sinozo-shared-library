@@ -60,7 +60,9 @@ def call(Map config) {
     defaults.each { k, v -> cfg[k] = config.containsKey(k) ? config[k] : v }
 
     pipeline {
-        agent { label cfg.agent ?: null }
+        agent {
+            label resolveAgentLabel(cfg)
+        }
 
         environment {
             PROJECT_NAME    = "${cfg.projectName}"
@@ -366,6 +368,29 @@ def inferEnvChoices() {
 }
 
 /**
+ * 解析 agent label，三层 fallback
+ *
+ * 优先级：
+ *   1. 业务 Jenkinsfile 显式传入：k8sDeploy(agent: 'k8s-node', ...)
+ *   2. Jenkins 全局环境变量：BUILD_AGENT_LABEL=k8s-node    (运维统一配)
+ *   3. null（任何节点）
+ *
+ * 注意：函数在 pipeline {} 块求值时调用，所以只能用纯 Groovy / env 变量，
+ * 不能用 fileExists/sh 等 step
+ */
+@NonCPS
+def resolveAgentLabel(Map cfg) {
+    if (cfg.agent?.trim()) {
+        return cfg.agent.trim()
+    }
+    def globalLabel = env?.BUILD_AGENT_LABEL
+    if (globalLabel?.trim()) {
+        return globalLabel.trim()
+    }
+    return null
+}
+
+/**
  * 自动定位 Library 已 clone 的根目录（含 baselines/ charts/ automation/）
  *
  * Jenkins 加载 Shared Library 时，会把整个仓库 clone 到：
@@ -377,47 +402,91 @@ def inferEnvChoices() {
  * 备用：环境变量 K8S_DEPLOY_DIR 显式指定（高级场景）
  */
 def resolveDeployBaseDir() {
-    // 优先：环境变量显式指定（高级场景或本地测试）
+    // 优先级 1：环境变量显式指定（高级场景或本地测试）
     if (env.K8S_DEPLOY_DIR?.trim() && fileExists("${env.K8S_DEPLOY_DIR}/baselines/_global.yaml")) {
+        echo "📍 使用环境变量 K8S_DEPLOY_DIR"
         return env.K8S_DEPLOY_DIR.trim()
     }
 
-    // 自动查找 ${WORKSPACE}@libs/ 下的 Library clone 目录
+    // 优先级 2：${WORKSPACE}@libs/ 下查找（controller 节点 OK，agent 节点通常找不到）
     def libsRoot = "${env.WORKSPACE}@libs"
     if (fileExists(libsRoot)) {
-        // 列出 @libs/ 下所有目录，找到含 baselines/_global.yaml 的那个
         def candidates = sh(
             script: """find ${libsRoot} -maxdepth 3 -type f -name '_global.yaml' -path '*/baselines/_global.yaml' 2>/dev/null | head -5""",
             returnStdout: true
         ).trim().split('\n').findAll { it }
 
         if (candidates) {
-            // 取第一个匹配，去掉 /baselines/_global.yaml 得到根目录
             def found = candidates[0].replaceFirst('/baselines/_global\\.yaml$', '')
-            echo "✅ 自动定位到 Library clone 路径"
+            echo "📍 使用 Library clone 路径（controller 上的 @libs/）"
             return found
         }
     }
 
-    // 兜底：传统路径（运维手动 clone 的方式）
+    // 优先级 3：传统路径（运维手动 clone 的兼容路径）
     def legacyPath = "/var/lib/jenkins/workspace/deploy/k8s-deploy"
     if (fileExists("${legacyPath}/baselines/_global.yaml")) {
-        echo "ℹ️  使用兼容路径（建议升级到自动定位）: ${legacyPath}"
+        echo "📍 使用兼容路径: ${legacyPath}"
         return legacyPath
     }
 
-    error """❌ 找不到 k8s-deploy 仓库（baselines/charts/automation 等运行时资产）
+    // 优先级 4：在 agent 上自动 clone（agent 节点上 Library 不会自动同步过来）
+    // 用 Jenkins 全局变量 K8S_DEPLOY_LIB_URL + K8S_DEPLOY_LIB_CRED 或默认值
+    def libUrl = env.K8S_DEPLOY_LIB_URL?.trim() ?: 'https://github.com/ChenJustin666/sinozo-shared-library.git'
+    def libCred = env.K8S_DEPLOY_LIB_CRED?.trim() ?: 'github-token-justin'
+    def libBranch = env.K8S_DEPLOY_LIB_BRANCH?.trim() ?: 'main'
+    def runtimeDir = "${env.WORKSPACE}/.k8s-deploy-runtime"
 
-期望的位置：
-  1. \${WORKSPACE}@libs/k8s-deploy-lib/         (Library 自动 clone)
-  2. /var/lib/jenkins/workspace/deploy/k8s-deploy/  (运维手动 clone)
-  3. \$K8S_DEPLOY_DIR 环境变量指定的目录
+    echo "📥 agent 节点上未找到运行时资产，自动 clone..."
+    echo "    URL:    ${libUrl}"
+    echo "    Cred:   ${libCred}"
+    echo "    Branch: ${libBranch}"
+    echo "    To:     ${runtimeDir}"
 
-排查：
-  - 确认 Jenkins 全局配置的 Shared Library 名称是 'k8s-deploy-lib'
-  - 确认 Library Path 配置为 'shared-library'
-  - 检查 \${WORKSPACE}@libs/ 目录内容
+    // 如果已经 clone 过，做 git pull 拉最新
+    if (fileExists("${runtimeDir}/.git")) {
+        withCredentials([usernamePassword(credentialsId: libCred,
+                                           usernameVariable: 'GIT_USER',
+                                           passwordVariable: 'GIT_PASS')]) {
+            sh """
+                cd ${runtimeDir}
+                git config credential.helper '!f() { echo username=\$GIT_USER; echo password=\$GIT_PASS; }; f'
+                git fetch --depth 1 origin ${libBranch} 2>&1 || true
+                git reset --hard origin/${libBranch} 2>&1 || true
+                git config --unset credential.helper 2>/dev/null || true
+            """
+        }
+    } else {
+        // 首次 clone
+        withCredentials([usernamePassword(credentialsId: libCred,
+                                           usernameVariable: 'GIT_USER',
+                                           passwordVariable: 'GIT_PASS')]) {
+            sh """
+                rm -rf ${runtimeDir}
+                # 从 https URL 中提取 host/path 拼接带凭据的 URL
+                AUTH_URL=\$(echo '${libUrl}' | sed 's|https://|https://'\$GIT_USER':'\$GIT_PASS'@|')
+                git clone --depth 1 -b ${libBranch} "\$AUTH_URL" ${runtimeDir}
+            """
+        }
+    }
+
+    if (!fileExists("${runtimeDir}/baselines/_global.yaml")) {
+        error """❌ 自动 clone 后仍找不到 baselines/_global.yaml
+
+可能原因：
+  - 凭据 ${libCred} 不存在或权限不足
+  - 仓库 URL 错误：${libUrl}
+  - 分支不存在：${libBranch}
+
+可在 Jenkins 全局环境变量配置覆盖：
+  K8S_DEPLOY_LIB_URL    自定义仓库 URL
+  K8S_DEPLOY_LIB_CRED   自定义凭据 ID
+  K8S_DEPLOY_LIB_BRANCH 自定义分支
 """
+    }
+
+    echo "✅ Clone 成功"
+    return runtimeDir
 }
 
 /**
