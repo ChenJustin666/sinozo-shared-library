@@ -113,16 +113,22 @@ def call(Map config) {
                 }
             }
 
-            stage('Checkout 业务代码 + 解析镜像目标') {
+            stage('解析镜像目标 + 计算 tag') {
                 steps {
                     script {
                         // ═══ Checkout 策略 ═══
-                        // 优先级 1：用户显式指定 gitUrl/gitCredId（极少见，用于 monorepo 切换仓库）
-                        // 优先级 2：使用 Jenkins Job 自身的 SCM 配置（推荐）
-                        //          - 此模式下 Jenkinsfile from SCM 会自动配 SCM
-                        //          - GIT_BRANCH 参数仍然生效（覆盖 SCM 默认分支）
-                        if (cfg.gitUrl?.trim() && cfg.gitCredId?.trim()) {
-                            echo "📥 Checkout 显式仓库: ${cfg.gitUrl}"
+                        // Jenkins "Pipeline from SCM" 模式已自动 checkout（Declarative: Checkout SCM）
+                        // 默认情况下不重复 checkout，直接复用 workspace
+                        //
+                        // 只在 2 种特殊场景才需要再 checkout：
+                        //   场景 A：用户传了 GIT_BRANCH 参数，且非首次构建（要切到指定分支/tag）
+                        //   场景 B：用户显式传了 gitUrl/gitCredId（monorepo 跨仓库部署）
+                        def needRecheckout = false
+                        def explicitRepo = (cfg.gitUrl?.trim() && cfg.gitCredId?.trim())
+                        def explicitBranch = (params.GIT_BRANCH?.trim() && params.GIT_BRANCH != env.BRANCH_NAME && params.GIT_BRANCH != 'main' && params.GIT_BRANCH != 'master')
+
+                        if (explicitRepo) {
+                            echo "📥 Checkout 显式仓库: ${cfg.gitUrl} (branch=${params.GIT_BRANCH})"
                             checkout([
                                 $class: 'GitSCM',
                                 branches: [[name: "${params.GIT_BRANCH}"]],
@@ -131,24 +137,29 @@ def call(Map config) {
                                     url: cfg.gitUrl
                                 ]]
                             ])
-                        } else {
-                            // 从 Job 的 SCM 配置自动获取 git 信息
-                            // Jenkins 在加载 Jenkinsfile 时已注入 scm 对象（含 url、credId）
-                            echo "📥 Checkout (从 Job SCM 配置自动获取): branch=${params.GIT_BRANCH}"
+                        } else if (explicitBranch) {
+                            echo "📥 切换到用户指定分支/tag: ${params.GIT_BRANCH}"
                             checkout([
                                 $class: 'GitSCM',
                                 branches: [[name: "${params.GIT_BRANCH}"]],
                                 userRemoteConfigs: scm.userRemoteConfigs,
                                 extensions: scm.extensions ?: []
                             ])
+                        } else {
+                            echo "📥 复用 Jenkins SCM 已 checkout 的 workspace（分支: ${env.BRANCH_NAME ?: 'auto'}）"
                         }
 
-                        // 自动获取 git 信息回填到 cfg（后续 stage 可能需要）
+                        // 自动获取 git 信息回填到 cfg
                         cfg.gitUrl = cfg.gitUrl ?: sh(
                             script: 'git config --get remote.origin.url',
                             returnStdout: true
                         ).trim()
+                        def actualBranch = sh(
+                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "(detached)"',
+                            returnStdout: true
+                        ).trim()
                         echo "📥 当前仓库: ${cfg.gitUrl}"
+                        echo "📥 当前分支: ${actualBranch}"
 
                         env.GIT_COMMIT_SHORT = sh(
                             script: 'git rev-parse --short=9 HEAD',
