@@ -19,17 +19,18 @@
  *    - 业务 values 在业务仓库 deploy/，运维基线在 k8s-deploy/baselines/
  *    - CI 部署前自动校验
  *
- * ═══ 使用方式 ═══
+ * ═══ 使用方式（极简，业务方不用配 git）═══
  * @Library('k8s-deploy-lib@main') _
  * k8sDeploy(
  *     projectName:  'adv',
  *     serviceName:  'ad-gateway',
  *     serviceType:  'java',
- *     gitUrl:       'http://gitea.example.com/adv/ad-gateway.git',
- *     gitCredId:    'git-adv-cred',
  *     dockerImage:  'ad-gateway',           // 不含 SWR project 前缀
  *     dockerCredId: 'docker-swr-cred',
  * )
+ *
+ * gitUrl/gitCredId 自动从 Jenkins Job 的 SCM 配置获取（Pipeline from SCM 模式）
+ * 仅当需要 checkout 其他仓库（极少见）时才显式传 gitUrl/gitCredId
  */
 def call(Map config) {
 
@@ -115,14 +116,39 @@ def call(Map config) {
             stage('Checkout 业务代码 + 解析镜像目标') {
                 steps {
                     script {
-                        checkout([
-                            $class: 'GitSCM',
-                            branches: [[name: "${params.GIT_BRANCH}"]],
-                            userRemoteConfigs: [[
-                                credentialsId: cfg.gitCredId,
-                                url: cfg.gitUrl
-                            ]]
-                        ])
+                        // ═══ Checkout 策略 ═══
+                        // 优先级 1：用户显式指定 gitUrl/gitCredId（极少见，用于 monorepo 切换仓库）
+                        // 优先级 2：使用 Jenkins Job 自身的 SCM 配置（推荐）
+                        //          - 此模式下 Jenkinsfile from SCM 会自动配 SCM
+                        //          - GIT_BRANCH 参数仍然生效（覆盖 SCM 默认分支）
+                        if (cfg.gitUrl?.trim() && cfg.gitCredId?.trim()) {
+                            echo "📥 Checkout 显式仓库: ${cfg.gitUrl}"
+                            checkout([
+                                $class: 'GitSCM',
+                                branches: [[name: "${params.GIT_BRANCH}"]],
+                                userRemoteConfigs: [[
+                                    credentialsId: cfg.gitCredId,
+                                    url: cfg.gitUrl
+                                ]]
+                            ])
+                        } else {
+                            // 从 Job 的 SCM 配置自动获取 git 信息
+                            // Jenkins 在加载 Jenkinsfile 时已注入 scm 对象（含 url、credId）
+                            echo "📥 Checkout (从 Job SCM 配置自动获取): branch=${params.GIT_BRANCH}"
+                            checkout([
+                                $class: 'GitSCM',
+                                branches: [[name: "${params.GIT_BRANCH}"]],
+                                userRemoteConfigs: scm.userRemoteConfigs,
+                                extensions: scm.extensions ?: []
+                            ])
+                        }
+
+                        // 自动获取 git 信息回填到 cfg（后续 stage 可能需要）
+                        cfg.gitUrl = cfg.gitUrl ?: sh(
+                            script: 'git config --get remote.origin.url',
+                            returnStdout: true
+                        ).trim()
+                        echo "📥 当前仓库: ${cfg.gitUrl}"
 
                         env.GIT_COMMIT_SHORT = sh(
                             script: 'git rev-parse --short=9 HEAD',
