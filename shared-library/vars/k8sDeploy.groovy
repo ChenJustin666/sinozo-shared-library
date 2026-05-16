@@ -72,8 +72,8 @@ def call(Map config) {
         parameters {
             choice(
                 name: 'DEPLOY_ENV',
-                choices: ['dev', 'test', 'prod'],
-                description: '部署环境（运维在 Job 配置中设定默认值）'
+                choices: inferEnvChoices(),
+                description: '部署环境（默认从 Job 名末段自动推断：xxx-dev / xxx-test / xxx-prod）'
             )
             gitParameter(
                 branchFilter: 'origin/(.*)',
@@ -322,6 +322,40 @@ def call(Map config) {
 // ════════════════════════════════════════════════════════════════════════
 // Helper functions
 // ════════════════════════════════════════════════════════════════════════
+
+/**
+ * 从 Job 名末段自动推断默认 DEPLOY_ENV，并把它放在 choices 第一位
+ *
+ * 规则：
+ *   - Job 名以 -dev / -test / -prod / -staging / -uat / -pre 结尾 → 用对应环境作默认
+ *   - 不匹配 → 用 'test' 作默认（多数情况）
+ *
+ * 例：
+ *   ad-gateway-dev   → ['dev', 'test', 'prod', ...]
+ *   ad-gateway-test  → ['test', 'dev', 'prod', ...]
+ *   ad-gateway-prod  → ['prod', 'test', 'dev', ...]
+ *   ad-gateway       → ['test', 'dev', 'prod', ...]   （无后缀，默认 test）
+ */
+@NonCPS
+def inferEnvChoices() {
+    def allEnvs = ['dev', 'test', 'prod']    // 候选环境，可按需扩展
+    def jobName = (env?.JOB_NAME ?: '').toLowerCase()
+
+    // 取 Job 名最后一段（去掉 folder 路径前缀）
+    def shortName = jobName.tokenize('/').last()
+
+    // 提取末段（最后一个 - 之后）
+    def suffix = shortName.tokenize('-').last()
+
+    // 如果末段命中已知环境，把它移到第一位
+    if (allEnvs.contains(suffix)) {
+        def reordered = [suffix] + allEnvs.findAll { it != suffix }
+        return reordered
+    }
+
+    // 不匹配，用 test 作默认（最常见场景）
+    return ['test', 'dev', 'prod']
+}
 
 /**
  * 读取 baselines/_global.yaml 的 image.projects 映射
