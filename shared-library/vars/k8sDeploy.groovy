@@ -422,17 +422,94 @@ def resolveDeployBaseDir() {
 
 /**
  * 读取 baselines/_global.yaml 的 image.projects 映射
+ *
+ * 不依赖 Pipeline Utility Steps 插件（readYaml）
+ * 用 awk 解析 YAML 中 image.projects 这一段（简单 key-value 结构）
+ *
+ * 期望的 YAML 片段：
+ *   image:
+ *     projects:
+ *       dev:  sinozo-test
+ *       test: sinozo-test
+ *       prod: sinozo-prod
  */
 def readImageProjectsMap() {
     def globalBaseline = "${env.DEPLOY_BASE_DIR}/baselines/_global.yaml"
     if (!fileExists(globalBaseline)) {
         error "❌ 未找到 ${globalBaseline}"
     }
-    def yaml = readYaml(file: globalBaseline)
-    def projectMap = yaml?.image?.projects
-    if (!projectMap || !(projectMap instanceof Map)) {
-        error "❌ baselines/_global.yaml 缺少 image.projects 映射"
+
+    // 优先用 python3 + PyYAML（精确）
+    // 兜底用 awk（简单 key-value 解析，适合扁平结构）
+    // 输出格式：每行 "key=value"
+    def kvPairs = sh(
+        script: """
+set -e
+F='${globalBaseline}'
+
+# 方案 1：python3 + yaml
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+    python3 - "\$F" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f) or {}
+projects = (data.get('image') or {}).get('projects') or {}
+for k, v in projects.items():
+    print(f'{k}={v}')
+PYEOF
+    exit 0
+fi
+
+# 方案 2：awk 状态机
+awk '
+BEGIN { in_image=0; in_projects=0 }
+/^image:[[:space:]]*\$/  { in_image=1; in_projects=0; next }
+/^[a-zA-Z]/              { if (!/^image:/) { in_image=0; in_projects=0 } }
+in_image && /^[[:space:]]+projects:[[:space:]]*\$/ { in_projects=1; next }
+in_projects && /^[[:space:]]{4,}[a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]/ {
+    line = \$0
+    sub(/^[[:space:]]+/, "", line)
+    sub(/[[:space:]]*#.*\$/, "", line)
+    colon = index(line, ":")
+    if (colon > 0) {
+        k = substr(line, 1, colon-1)
+        v = substr(line, colon+1)
+        gsub(/^[[:space:]]+|[[:space:]]+\$/, "", v)
+        gsub(/^["'"'"']|["'"'"']\$/, "", v)
+        if (k != "" && v != "") print k "=" v
     }
+}
+in_projects && /^[[:space:]]{0,3}[a-zA-Z]/ { in_projects=0 }
+' "\$F"
+        """,
+        returnStdout: true
+    ).trim()
+
+    def projectMap = [:]
+    if (kvPairs) {
+        kvPairs.split('\n').each { line ->
+            def parts = line.split('=', 2)
+            if (parts.length == 2) {
+                projectMap[parts[0].trim()] = parts[1].trim()
+            }
+        }
+    }
+
+    if (projectMap.isEmpty()) {
+        error """❌ baselines/_global.yaml 中未解析到 image.projects 映射
+
+期望的格式：
+  image:
+    projects:
+      dev:  sinozo-test
+      test: sinozo-test
+      prod: sinozo-prod
+
+实际文件: ${globalBaseline}
+"""
+    }
+
+    echo "📌 解析到 image.projects 映射: ${projectMap}"
     return projectMap
 }
 
