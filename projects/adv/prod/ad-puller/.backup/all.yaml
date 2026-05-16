@@ -1,0 +1,128 @@
+---
+# Source: generic-service/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ad-puller-service
+  namespace: adv-prod
+  labels:
+    app: ad-puller
+    project: adv
+    environment: prod
+  annotations:
+    created-at: 2026-04-28 15:00:16
+    created-by: helm-deploy
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app: ad-puller
+---
+# Source: generic-service/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ad-puller
+  namespace: adv-prod
+  labels:
+    app: ad-puller
+    project: adv
+    environment: prod
+  annotations:
+    created-at: 2026-04-28 15:00:16
+    created-by: helm-deploy
+    project: adv
+    environment: prod
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/actuator/prometheus"
+spec:
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: ad-puller
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: ad-puller
+        project: adv
+        environment: prod
+      annotations:
+        timestamp: "2026-04-28T15:00:16"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      containers:
+        - name: ad-puller
+          image: "swr.ap-southeast-3.myhuaweicloud.com/sinozo-test/ad-puller:Ra5e65a021"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: JAVA_OPTS
+              value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=72.0 -XX:MaxMetaspaceSize=256m -XX:InitialRAMPercentage=30.0 -XX:MaxGCPauseMillis=200 -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapdump.hprof -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8 -DNACOS_SERVERS=nacos-clusterip.nacos.svc.cluster.local:8848 -DNACOS_NAMESPACE=adv_test -DNACOS_GROUP=DEFAULT_GROUP -DNACOS_USERNAME=$(NACOS_USERNAME) -DNACOS_PASSWORD=$(NACOS_PASSWORD) -Dspring.profiles.active=$(SPRING_PROFILE)"
+            - name: NACOS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  key: NACOS_USERNAME
+                  name: nacos-secret
+            - name: NACOS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NACOS_PASSWORD
+                  name: nacos-secret
+            - name: SPRING_PROFILE
+              valueFrom:
+                secretKeyRef:
+                  key: SPRING_PROFILE
+                  name: nacos-secret
+          resources:
+            limits:
+              cpu: 2
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+      imagePullSecrets:
+        - name: regcred
+      securityContext:
+        fsGroup: 1000

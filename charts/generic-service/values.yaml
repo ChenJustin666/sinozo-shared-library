@@ -1,0 +1,173 @@
+# ============================================================
+# Helm 通用部署 Chart - 默认配置
+# 支持两种工作负载类型：Deployment / StatefulSet
+# 默认只生成：Deployment + Service
+# 其他资源需要显式 enabled: true 才会生成
+# ============================================================
+
+# ── 项目信息 ──
+project: ""           # 项目名（如 adv）
+environment: ""       # 环境（test / prod / dev）
+
+# ── 工作负载类型 ──
+# deployment    : 普通无状态服务（Java 后端、前端）
+# statefulset   : 有状态服务（防关联、独立外网 EIP）
+workloadType: deployment
+
+# ── 服务配置 ──
+service:
+  name: ""
+  namespace: ""
+  port: 8080
+  replicas: 1
+  type: ClusterIP       # ClusterIP / LoadBalancer / NodePort
+  annotations: {}       # Service 级别注解（如 SLB 配置）
+
+# ── 镜像配置 ──
+image:
+  registry: swr.ap-southeast-3.myhuaweicloud.com
+  name: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecret: regcred
+  createPullSecret: false
+  pullSecretData: ""    # base64 编码的 dockerconfigjson（Jenkins 注入）
+
+# ── Java 配置 ──
+java:
+  enabled: false
+  opts: ""
+
+# ── 探针配置 ──
+probes:
+  enabled: false
+  type: http            # http / tcp
+  path: /health
+  port: 8080
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+
+# ── 监控配置（Prometheus annotations）──
+# 开启后会在 Pod annotations 中添加 prometheus.io/* 注解
+monitoring:
+  enabled: false
+  path: /actuator/prometheus
+  port: 8080
+
+# ── 资源配置 ──
+resources:
+  enabled: false
+  limits:
+    cpu: 1
+    memory: 2Gi
+  requests:
+    cpu: 256m
+    memory: 512Mi
+
+# ══════════════════════════════════════════════════════════════
+# 以下资源默认关闭，需要显式 enabled: true 才会生成对应 YAML
+# ══════════════════════════════════════════════════════════════
+
+# ── Ingress 配置（默认关闭）──
+ingress:
+  enabled: false
+  items: []
+  # 示例见 examples/values-frontend.yaml
+
+# ── HPA 配置（默认关闭）──
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  cpuTarget: 70
+  memoryTarget: 0       # 0 表示不启用内存指标
+
+# ── PDB 配置（默认关闭）──
+pdb:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: 0
+
+# ── PVC 配置（默认关闭，仅 Deployment 用）──
+pvc:
+  enabled: false
+  storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  storageClass: ""
+
+# ── StatefulSet 卷模板（StatefulSet 专用）──
+volumeClaimTemplates: []
+# 示例：
+# volumeClaimTemplates:
+#   - name: data
+#     accessModes: [ "ReadWriteOnce" ]
+#     storageClass: alicloud-disk-essd
+#     storage: 20Gi
+#     mountPath: /var/lib/app
+
+# ── Secret 配置（默认关闭）──
+secret:
+  enabled: false
+  name: ""              # 留空则自动生成 {service.name}-secret
+  type: Opaque
+  mountPath: ""         # 留空则不挂载，只创建 Secret 资源
+  data: {}              # base64 编码的数据
+  stringData: {}        # 明文数据（K8s 自动 base64）
+
+# ── ConfigMap 配置（默认关闭）──
+configmap:
+  enabled: false
+  name: ""              # 留空则自动生成 {service.name}-config
+  mountPath: /config
+  data: {}
+
+# ── 部署策略 ──
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# ── StatefulSet 更新策略 ──
+updateStrategy:
+  type: RollingUpdate
+  partition: 0
+
+# ── ServiceAccount ──
+serviceAccount:
+  name: ""
+
+# ── 安全上下文 ──
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# ── 额外标签和注解 ──
+# extraAnnotations 会同时加到 metadata 和 Pod template
+# 防关联服务的 Terway EIP 注解放这里
+extraLabels: {}
+extraAnnotations: {}
+
+# ── 环境变量 ──
+env: []
+
+# ── 存储卷（自定义）──
+volumes: []
+volumeMounts: []
+
+# ── 节点调度 ──
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,96 @@
+# ============================================================
+# 防关联服务 values 模板（FCM 推送 / 订阅 / AdMob）
+# StatefulSet + Terway Pod EIP（固定外网 IP，重启不变）
+# 配置全部走 Nacos，credentials 也存 Nacos
+# ============================================================
+# 新增一个防关联服务只需要：
+#   1. 复制此文件，改 service.name 和 java.opts 中的 namespace
+#   2. Nacos 创建对应 namespace + 配置
+#   3. git push → Jenkins 自动部署
+# ============================================================
+
+# ── 项目信息 ──
+project: adv
+environment: prod
+
+# ── 工作负载类型 ──
+workloadType: statefulset
+
+# ── 服务配置 ──
+service:
+  name: fc06-gcp                    # ← 改这里（每个防关联实例唯一）
+  namespace: adv-prod
+  port: 8080
+  replicas: 1                       # 防关联服务固定 1 副本
+  type: ClusterIP                   # 不需要 LoadBalancer，用 Terway Pod EIP
+
+# ── 镜像（所有防关联实例共用同一个镜像）──
+image:
+  registry: swr.ap-southeast-3.myhuaweicloud.com
+  name: sinozo-prod/fcm-push        # 同一个 JAR 包
+  tag: latest                        # Jenkins 构建时覆盖
+  pullSecret: regcred
+
+# ── Java 配置（Nacos namespace 区分不同实例）──
+java:
+  enabled: true
+  opts: >-
+    -Dspring.application.name=fcm-push
+    -Dspring.profiles.active=prod
+    -Dspring.cloud.nacos.config.server-addr=nacos.internal:8848
+    -Dspring.cloud.nacos.config.namespace=fc06-gcp
+    -Dspring.cloud.nacos.config.username=nacos
+    -Dspring.cloud.nacos.config.password=nacos123
+    -Dspring.cloud.nacos.config.file-extension=properties
+    -Dspring.cloud.nacos.discovery.server-addr=nacos.internal:8848
+    -Dspring.cloud.nacos.discovery.namespace=fc06-gcp
+    -Xms1g -Xmx2g
+
+# ── 资源 ──
+resources:
+  enabled: true
+  limits:
+    cpu: "1"
+    memory: 2Gi
+  requests:
+    cpu: 256m
+    memory: 512Mi
+
+# ── 探针（TCP 模式，Java 服务端口检测）──
+probes:
+  enabled: true
+  type: tcp
+  port: 8080
+
+# ── Terway Pod EIP（防关联核心：每个 Pod 独立外网 IP，重启不变）──
+extraAnnotations:
+  k8s.aliyun.com/pod-with-eip: "true"
+  k8s.aliyun.com/eip-bindmode: "pod"
+  k8s.aliyun.com/pod-eip-bandwidth: "5"
+  k8s.aliyun.com/pod-eip-charge-type: "PayByTraffic"
+  k8s.aliyun.com/pod-eip-isp: "BGP"
+  k8s.aliyun.com/pod-eip-release-strategy: "Never"
+
+# ── 安全上下文（Java 服务用普通用户）──
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# ══════════════════════════════════════════════════════════════
+# 以下功能默认关闭
+# ══════════════════════════════════════════════════════════════
+
+# ── 监控（可选开启）──
+# monitoring:
+#   enabled: true
+#   path: /actuator/prometheus
+#   port: 8080
+
+# ── 不需要 Ingress（防关联服务只需要出口 IP）──
+# ingress:
+#   enabled: false
+
+# ── 不需要 HPA（固定 1 副本）──
+# hpa:
+#   enabled: false

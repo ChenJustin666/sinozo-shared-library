@@ -1,0 +1,18 @@
+{{- if .Values.configmap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.configmap.name | default (printf "%s-config" .Values.service.name) }}
+  namespace: {{ .Values.service.namespace }}
+  labels:
+    app: {{ .Values.service.name }}
+    project: {{ .Values.project }}
+    environment: {{ .Values.environment }}
+  annotations:
+    created-at: {{ now | date "2006-01-02 15:04:05" }}
+    created-by: helm-deploy
+data:
+  {{- with .Values.configmap.data }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}

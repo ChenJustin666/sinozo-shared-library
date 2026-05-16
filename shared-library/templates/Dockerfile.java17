@@ -1,0 +1,29 @@
+# ============================================================
+# Java 17 后端服务 Dockerfile
+# 构建方式：Jenkins 节点上 Maven 构建 jar，这里只打运行镜像
+# Maven 缓存位置：Jenkins 节点 /home/jenkins/.m2/repository
+# 使用方式：复制到业务仓库根目录，重命名为 Dockerfile
+# 要求：pom.xml 里配置 <finalName>app</finalName>
+# ============================================================
+FROM eclipse-temurin:17-jre-alpine
+
+RUN apk add --no-cache curl tzdata && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone && \
+    apk del tzdata && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /app
+
+# Jenkins 构建完的 jar 包在 target/ 目录
+COPY target/app.jar app.jar
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+ENV JAVA_OPTS="" \
+    TZ=Asia/Shanghai
+
+EXPOSE 8080
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

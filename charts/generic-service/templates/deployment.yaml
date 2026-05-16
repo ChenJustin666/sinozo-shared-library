@@ -1,0 +1,173 @@
+{{- if eq (include "generic.workloadType" .) "deployment" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.service.name }}
+  namespace: {{ .Values.service.namespace }}
+  labels:
+    {{- include "generic.labels" . | nindent 4 }}
+    {{- with .Values.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- include "generic.annotations" . | nindent 4 }}
+    {{- with .Values.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.service.replicas }}
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      {{- include "generic.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.strategy.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.strategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "generic.labels" . | nindent 8 }}
+      annotations:
+        timestamp: "{{ now | date "2006-01-02T15:04:05" }}"
+        {{- include "generic.monitoringAnnotations" . | nindent 8 }}
+        {{- with .Values.extraAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.name }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.service.name }}
+          image: "{{ include "generic.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- if or .Values.env .Values.java.enabled }}
+          env:
+            {{- if .Values.java.enabled }}
+            - name: JAVA_OPTS
+              value: "{{ .Values.java.opts }}"
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.resources.enabled }}
+          resources:
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+          {{- end }}
+          {{- if .Values.probes.enabled }}
+          {{- if eq .Values.probes.type "http" }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.probes.port }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.probes.port }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.probes.port }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- else if eq .Values.probes.type "tcp" }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.probes.port }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.probes.port }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          startupProbe:
+            tcpSocket:
+              port: {{ .Values.probes.port }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- end }}
+          {{- if or .Values.volumeMounts .Values.configmap.enabled .Values.secret.enabled }}
+          volumeMounts:
+            {{- if .Values.configmap.enabled }}
+            - name: config
+              mountPath: {{ .Values.configmap.mountPath }}
+            {{- end }}
+            {{- if and .Values.secret.enabled .Values.secret.mountPath }}
+            - name: secret
+              mountPath: {{ .Values.secret.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.securityContext }}
+          securityContext:
+            runAsUser: {{ .Values.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.securityContext.runAsGroup }}
+            {{- if ne (int .Values.securityContext.runAsUser) 0 }}
+            runAsNonRoot: true
+            {{- end }}
+            allowPrivilegeEscalation: false
+          {{- end }}
+      {{- if or .Values.volumes .Values.configmap.enabled (and .Values.secret.enabled .Values.secret.mountPath) }}
+      volumes:
+        {{- if .Values.configmap.enabled }}
+        - name: config
+          configMap:
+            name: {{ .Values.configmap.name | default (printf "%s-config" .Values.service.name) }}
+        {{- end }}
+        {{- if and .Values.secret.enabled .Values.secret.mountPath }}
+        - name: secret
+          secret:
+            secretName: {{ .Values.secret.name | default (printf "%s-secret" .Values.service.name) }}
+        {{- end }}
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- if .Values.securityContext }}
+      securityContext:
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

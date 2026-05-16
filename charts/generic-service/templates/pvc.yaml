@@ -1,0 +1,25 @@
+{{- if .Values.pvc.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.service.name }}-pvc
+  namespace: {{ .Values.service.namespace }}
+  labels:
+    app: {{ .Values.service.name }}
+    project: {{ .Values.project }}
+    environment: {{ .Values.environment }}
+  annotations:
+    created-at: "{{ now | date "2006-01-02 15:04:05" }}"
+    created-by: helm-deploy
+spec:
+  accessModes:
+    {{- range .Values.pvc.accessModes }}
+    - {{ . }}
+    {{- end }}
+  {{- if .Values.pvc.storageClass }}
+  storageClassName: {{ .Values.pvc.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.pvc.storage }}
+{{- end }}

@@ -1,0 +1,25 @@
+/**
+ * Node.js / 前端服务 Jenkinsfile 模板
+ *
+ * 前端使用 Docker 多阶段构建（node build → nginx 运行），不需要 Jenkins 装 Node.js
+ * 环境：由 Job 参数 DEPLOY_ENV 控制（test/prod）
+ * kubeconfig：默认自动推断 k8s-{projectName}-{DEPLOY_ENV}
+ */
+@Library('k8s-deploy-lib@main') _
+
+k8sDeploy(
+    // ═══ 必填 ═══
+    projectName:      'adv',
+    serviceName:      'ad-admin-fe',
+    serviceType:      'nodejs',
+    gitUrl:           'http://git.example.com/frontend/AdAdmin.git',
+    gitCredId:        'git-adv-cred',
+    dockerImage:      'sinozo/ad-admin-fe',
+    dockerCredId:     'docker-swr-cred',
+
+    // ═══ 可选 ═══
+    // agent:            'docker-build',             // 构建节点标签
+    // kubeconfigCredId: 'k8s-adv-test',            // 手动指定集群
+    // subdirectory:     '',                         // MonoRepo 子目录
+    // defaultBranch:    'main',
+)

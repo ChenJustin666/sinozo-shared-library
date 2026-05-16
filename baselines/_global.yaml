@@ -1,0 +1,51 @@
+# ============================================================
+# 全局基线 (baselines/_global.yaml)
+# ============================================================
+# 范围：所有服务部署时必加载
+# Owner：运维 / 平台组
+# Review：季度
+# ============================================================
+
+# ── 镜像基础设施 ────────────────────────────────────────────
+# 多 project 隔离：dev/test 和 prod 用不同的 SWR organization
+# 同一 commit 在 dev 构建时 push 到 test project；
+# 进入 prod 流程时由 Pipeline 自动 promotion（docker tag + push）到 prod project，
+# 不重新构建，保证 layer 完全一致。
+image:
+  registry: swr.ap-southeast-3.myhuaweicloud.com
+
+  # 镜像 organization（华为云 SWR 的 project）映射
+  # key = DEPLOY_ENV, value = SWR 上的 organization 名
+  # ⚠️ dev 和 test 必须用同一个 organization（否则 test 找不到 dev 构建的镜像）
+  projects:
+    dev:  sinozo-test
+    test: sinozo-test
+    prod: sinozo-prod
+
+  # K8s ImagePullSecret 名（每个 namespace 自动创建）
+  pullSecret: regcred
+  pullPolicy: IfNotPresent
+
+# ── 容器安全（合规底线）─────────────────────────────────────
+# 所有容器禁止 root；所有 prod 服务强制非 root 运行
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# ── 部署策略（零停机）───────────────────────────────────────
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# ── 资源默认值（业务可在 deploy/ 里覆盖 requests，不可覆盖 limits）─
+resources:
+  enabled: true
+  limits:
+    cpu: "4"
+    memory: 8Gi
+  requests:
+    cpu: 256m
+    memory: 512Mi

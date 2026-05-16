@@ -1,0 +1,89 @@
+# ============================================================
+# 前端服务 values 模板
+# deployment + service + 双 ingress（ALB）
+# ingress-1: API 网关代理（rewrite）
+# ingress-2: 前端静态资源
+# ============================================================
+
+# ── 项目信息 ──
+project: adv
+environment: test
+
+# ── 服务配置 ──
+service:
+  name: ad-reactad
+  namespace: adv-test
+  port: 80
+  replicas: 1
+  type: ClusterIP
+
+# ── 镜像 ──
+image:
+  registry: swr.ap-southeast-3.myhuaweicloud.com
+  name: sinozo-test/ad-reactad
+  tag: latest
+  pullSecret: regcred
+
+# ── 资源 ──
+resources:
+  enabled: true
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# ── Ingress（前端需要两个）──
+ingress:
+  enabled: true
+  items:
+    # ── Ingress 1: API 网关代理 ──
+    - name: api
+      className: alb
+      labels:
+        ingress-controller: alb
+      annotations:
+        alb.ingress.kubernetes.io/use-regex: "true"
+        alb.ingress.kubernetes.io/rewrite-target: /${2}
+        alb.ingress.kubernetes.io/order: "1"
+        alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80},{"HTTPS": 443}]'
+        alb.ingress.kubernetes.io/ssl-redirect: "true"
+      hosts:
+        - host: test-advreac.sinozo.com
+          paths:
+            - path: /test(/|$)(.*)
+              pathType: Prefix
+              backend:
+                service: ad-gateway-svc    # 指向网关服务
+                port: 9099
+      tls:
+        enabled: true
+        hosts:
+          - test-advreac.sinozo.com
+
+    # ── Ingress 2: 前端静态资源 ──
+    - name: web
+      className: alb
+      labels:
+        ingress-controller: alb
+      annotations:
+        alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80},{"HTTPS": 443}]'
+        alb.ingress.kubernetes.io/ssl-redirect: "true"
+      hosts:
+        - host: test-advreac.sinozo.com
+          paths:
+            - path: /
+              pathType: Prefix
+              # 不指定 backend 则默认用本服务（ad-reactad-service:80）
+      tls:
+        enabled: true
+        hosts:
+          - test-advreac.sinozo.com
+
+# ── 健康探针 ──
+# probes:
+#   enabled: true
+#   type: http
+#   path: /
+#   port: 80

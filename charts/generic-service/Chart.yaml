@@ -1,0 +1,6 @@
+apiVersion: v2
+name: generic-service
+description: 通用服务部署Chart - 支持所有Java/NodeJS项目复用
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
