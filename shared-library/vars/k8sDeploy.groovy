@@ -66,7 +66,8 @@ def call(Map config) {
             PROJECT_NAME    = "${cfg.projectName}"
             SERVICE_NAME    = "${cfg.serviceName}"
             DOCKER_REGISTRY = "${cfg.dockerRegistry}"
-            DEPLOY_BASE_DIR = "/var/lib/jenkins/workspace/deploy/k8s-deploy"
+            // DEPLOY_BASE_DIR 在 "解析镜像目标" stage 中自动定位（Library 已 clone 的路径）
+            // 不需要运维手动在节点上 clone 仓库
         }
 
         parameters {
@@ -116,6 +117,13 @@ def call(Map config) {
             stage('解析镜像目标 + 计算 tag') {
                 steps {
                     script {
+                        // ═══ 自动定位 DEPLOY_BASE_DIR ═══
+                        // Jenkins 加载 Shared Library 时已自动 clone 整个仓库到：
+                        //   ${WORKSPACE}@libs/<library-name>/
+                        // 这个目录里有完整的 baselines/ charts/ automation/，无需运维手动 clone
+                        env.DEPLOY_BASE_DIR = resolveDeployBaseDir()
+                        echo "📍 DEPLOY_BASE_DIR (自动定位): ${env.DEPLOY_BASE_DIR}"
+
                         // ═══ Checkout 策略 ═══
                         // Jenkins "Pipeline from SCM" 模式已自动 checkout（Declarative: Checkout SCM）
                         // 默认情况下不重复 checkout，直接复用 workspace
@@ -355,6 +363,61 @@ def inferEnvChoices() {
 
     // 不匹配，用 test 作默认（最常见场景）
     return ['test', 'dev', 'prod']
+}
+
+/**
+ * 自动定位 Library 已 clone 的根目录（含 baselines/ charts/ automation/）
+ *
+ * Jenkins 加载 Shared Library 时，会把整个仓库 clone 到：
+ *   ${WORKSPACE}@libs/<library-name>/                    (单 library 默认)
+ *   ${WORKSPACE}@libs/<library-name>@<version>/<hash>/   (新版 Jenkins 用 hash)
+ *
+ * 我们直接在 ${WORKSPACE}@libs/ 下找包含 baselines/_global.yaml 的目录
+ *
+ * 备用：环境变量 K8S_DEPLOY_DIR 显式指定（高级场景）
+ */
+def resolveDeployBaseDir() {
+    // 优先：环境变量显式指定（高级场景或本地测试）
+    if (env.K8S_DEPLOY_DIR?.trim() && fileExists("${env.K8S_DEPLOY_DIR}/baselines/_global.yaml")) {
+        return env.K8S_DEPLOY_DIR.trim()
+    }
+
+    // 自动查找 ${WORKSPACE}@libs/ 下的 Library clone 目录
+    def libsRoot = "${env.WORKSPACE}@libs"
+    if (fileExists(libsRoot)) {
+        // 列出 @libs/ 下所有目录，找到含 baselines/_global.yaml 的那个
+        def candidates = sh(
+            script: """find ${libsRoot} -maxdepth 3 -type f -name '_global.yaml' -path '*/baselines/_global.yaml' 2>/dev/null | head -5""",
+            returnStdout: true
+        ).trim().split('\n').findAll { it }
+
+        if (candidates) {
+            // 取第一个匹配，去掉 /baselines/_global.yaml 得到根目录
+            def found = candidates[0].replaceFirst('/baselines/_global\\.yaml$', '')
+            echo "✅ 自动定位到 Library clone 路径"
+            return found
+        }
+    }
+
+    // 兜底：传统路径（运维手动 clone 的方式）
+    def legacyPath = "/var/lib/jenkins/workspace/deploy/k8s-deploy"
+    if (fileExists("${legacyPath}/baselines/_global.yaml")) {
+        echo "ℹ️  使用兼容路径（建议升级到自动定位）: ${legacyPath}"
+        return legacyPath
+    }
+
+    error """❌ 找不到 k8s-deploy 仓库（baselines/charts/automation 等运行时资产）
+
+期望的位置：
+  1. \${WORKSPACE}@libs/k8s-deploy-lib/         (Library 自动 clone)
+  2. /var/lib/jenkins/workspace/deploy/k8s-deploy/  (运维手动 clone)
+  3. \$K8S_DEPLOY_DIR 环境变量指定的目录
+
+排查：
+  - 确认 Jenkins 全局配置的 Shared Library 名称是 'k8s-deploy-lib'
+  - 确认 Library Path 配置为 'shared-library'
+  - 检查 \${WORKSPACE}@libs/ 目录内容
+"""
 }
 
 /**
