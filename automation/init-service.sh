@@ -192,11 +192,12 @@ service:
 resources:
   enabled: true
   requests:
-    cpu: 100m
-    memory: 256Mi
-  limits:
-    cpu: 500m
+    cpu: 300m
     memory: 1Gi
+  limits:
+    cpu: 800m
+    memory: 2Gi
+
 
 EOF
 
