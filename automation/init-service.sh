@@ -98,6 +98,10 @@ fi
 echo -e "  ${GREEN}✓${NC} Dockerfile"
 
 # ── 1.2 Jenkinsfile ────────────────────────────────────────
+# 设计：
+#   - gitUrl/gitCredId 自动从 Jenkins SCM 拿，不写
+#   - kubeconfigCredId Map 形式，业务方按实际改集群名
+#   - Java 服务必带 jdkTool + mavenTool（不写运维要去配 Tool 才能跑）
 cat > "$OUT_DIR/Jenkinsfile" <<EOF
 @Library('k8s-deploy-lib@main') _
 
@@ -105,11 +109,27 @@ k8sDeploy(
     projectName:  '$PROJECT',
     serviceName:  '$SERVICE',
     serviceType:  '$TYPE',
-    gitUrl:       '$GIT_BASE_URL/$PROJECT/$SERVICE.git',
-    gitCredId:    'git-$PROJECT-cred',
-    dockerImage:  '$DOCKER_REGISTRY/$SERVICE',
-    dockerCredId: 'docker-swr-cred',$([ "$TYPE" = "java" ] && echo "
-    jdkTool:      'jdk 1.8',")
+    dockerImage:  '$SERVICE',
+    dockerCredId: 'docker-swr-cred',
+EOF
+
+if [ "$TYPE" = "java" ]; then
+cat >> "$OUT_DIR/Jenkinsfile" <<'EOF'
+
+    // ── Java 构建工具（Jenkins Manage → Tools 中配置的名字）──
+    jdkTool:      'jdk 1.8',           // 改成实际 JDK Tool 名（如 'JDK 17'）
+    mavenTool:    'Maven 3.8.8',       // 改成实际 Maven Tool 名
+
+EOF
+fi
+
+cat >> "$OUT_DIR/Jenkinsfile" <<EOF
+    // ── kubeconfig 凭据（按环境分别指定）──
+    // 在 Jenkins Manage → Credentials 中创建 Secret file 类型凭据
+    kubeconfigCredId: [
+        test: 'test-k8s-cluster',      // ⚠️ 改成实际 Jenkins 凭据 ID
+        prod: 'prod-k8s-cluster',      // ⚠️ 改成实际 Jenkins 凭据 ID
+    ],
 )
 EOF
 echo -e "  ${GREEN}✓${NC} Jenkinsfile"
