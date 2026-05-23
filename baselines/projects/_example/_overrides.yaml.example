@@ -1,0 +1,37 @@
+# ============================================================
+# 项目级覆盖文件（示例）
+# 真实使用时复制到 baselines/projects/<project>/_overrides.yaml
+# 文件名 .example 不会被加载（CI 只读 _overrides.yaml）
+# ============================================================
+#
+# 何时使用：
+#   - 项目走独立 SWR organization（不是全局 sinozo-test/sinozo-prod）
+#   - K8s namespace 历史命名不规范（不是 <project>-<env>）
+#   - 不同 region / pullSecret
+#
+# 默认 90% 项目用不上这个文件 → 直接走 baselines/_global.yaml
+# ============================================================
+
+# ── 镜像基础设施（按需写，不写继承全局）──
+image:
+  # 不同 region：覆盖全局 swr.ap-southeast-3
+  # registry: swr.cn-north-4.myhuaweicloud.com
+
+  # 不同 SWR organization：覆盖全局 sinozo-test/sinozo-prod
+  # 注意：写了 image.projects 会【整体覆盖】全局，所有环境都要写完整
+  projects:
+    dev:  pay-test
+    test: pay-test
+    prod: pay-prod
+
+  # 不同 pullSecret 名：覆盖全局 regcred
+  # pullSecret: pay-regcred
+
+# ── K8s namespace 命名（按需写，不写默认 {project}-{env}）──
+# 这是覆盖 namespace 命名约定的唯一入口
+# 用法：
+#   场景 A：默认（不写本字段）→ namespace = <project>-<env>，例如 adv-test / adv-prod
+#   场景 B：自定义 → 显式指定每个环境的 namespace
+namespaces:
+  test: pay-ops-test
+  prod: pay-ops-prd

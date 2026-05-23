@@ -30,9 +30,10 @@
 def call(Map config, String deployEnv, def params) {
     def baseDir     = env.DEPLOY_BASE_DIR
     def chartPath   = "${baseDir}/charts/generic-service"
-    def namespace   = "${config.projectName}-${deployEnv}"
+    def namespace   = resolveNamespace(config, deployEnv, baseDir)
     def releaseName = config.serviceName
     def skipHealth  = params.SKIP_HEALTH_CHECK ?: false
+
 
     if (params.ACTION == 'deploy') {
         deploy(config, deployEnv, chartPath, namespace, releaseName, skipHealth, baseDir)
@@ -84,10 +85,12 @@ def deploy(Map config, String deployEnv, String chartPath,
         helmCmd += " --set nacos.password=${env.NACOS_PASSWORD}"
     }
 
-    // 部署前预览（生产环境打印前 50 行配置摘要）
-    if (deployEnv == 'prod') {
-        previewConfig(chartPath, valuesChain.allFiles, releaseName)
-    }
+    // 部署前预览（test/prod 都跑）
+    //   1. helm template 渲染完整 manifest 备份到 ~/.deploy-previews/<env>/<svc>-<tag>-<ts>.yaml
+    //   2. console 打印前 100 行（运维快速看，全文在备份文件里）
+    //   3. 30 天前的备份自动清理
+    previewConfig(chartPath, valuesChain.allFiles, releaseName, deployEnv)
+
 
     // 部署前 adopt 既有的资源（手工创建的没有 Helm 标签，会冲突）
     // 把可能预先存在的同名资源都打上 Helm 标签让 chart 接管
@@ -130,7 +133,18 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
         echo "  ⚠️  未找到 baselines/_global.yaml，跳过"
     }
 
+    // ── 1.5. 项目级覆盖（可选，存在则覆盖全局）──
+    // 用途：项目要自定义 SWR registry / project 命名 / pullSecret / namespace 等
+    //       基础设施时，运维在 baselines/projects/<project>/_overrides.yaml 写覆盖项。
+    //       默认不存在 → 完全继承 _global.yaml（90% 项目场景）
+    def projectOverrides = "${baseDir}/baselines/projects/${config.projectName}/_overrides.yaml"
+    if (fileExists(projectOverrides)) {
+        files << projectOverrides
+        echo "  📎 项目级覆盖: baselines/projects/${config.projectName}/_overrides.yaml"
+    }
+
     // ── 2. 业务通用（业务仓库 deploy/values.yaml）──
+
     // 所有环境都加载，业务方写公共配置（端口、健康检查、JVM 默认）
     def businessDir = config.subdirectory ? "${env.WORKSPACE}/${config.subdirectory}/deploy" : "${env.WORKSPACE}/deploy"
     def businessCommon = "${businessDir}/values.yaml"
@@ -150,10 +164,13 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
             files << prodValues
             echo "  📎 生产配置（运维仓库）: baselines/prod-values/${config.projectName}/${config.serviceName}/values-prod.yaml"
         } else {
-            // prod 配置不存在 → 直接 fail 并给出运维操作指引
-            error generateProdMissingError(config, baseDir, businessDir)
+            // prod 配置不存在 → 自动从业务 test values 生成 prod 模板 + 尝试 push
+            // 不管 push 是否成功，本次部署都 fail，等运维 review 后再触发
+            autoGenerateProdValues(config, baseDir, businessDir)
+            error generateProdReviewMessage(config, baseDir)
         }
     } else {
+
         // test / dev：从业务仓库读
         def businessEnv = "${businessDir}/values-${deployEnv}.yaml"
         if (fileExists(businessEnv)) {
@@ -182,81 +199,176 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
 }
 
 /**
- * 生成"prod 配置缺失"错误信息（含运维操作指引和 git 冲突解决方案）
+ * 自动生成 prod values 文件（基于业务 deploy/values-test.yaml + prod 增量调整）
+ *
+ * 流程:
+ *   1. 在 agent 本地的 ${baseDir}（已经是 git clone 的运维仓库）创建文件
+ *   2. 内容 = 业务 test values 的副本 + 文件头自动加入 prod 默认调整建议（注释形式）
+ *   3. 尝试 git commit + push（用 K8S_DEPLOY_LIB_CRED 凭据）
+ *      - 成功 → 运维 review main 分支这次 commit
+ *      - 失败（无写权限/冲突）→ console 打印完整内容，运维手工 cp 到运维仓库 push
+ *   4. 不管 push 成功与否，本次部署都 fail（运维必须 review 一遍才能放行）
+ *
+ * 安全设计：
+ *   - 这是【模板】，运维必须 review 后才会真正生效（CI 不会用本次生成的文件直接部署）
+ *   - 副本/资源/JVM 等关键字段保留 test 默认值，运维必须按实际改
  */
-def generateProdMissingError(Map config, String baseDir, String businessDir) {
+def autoGenerateProdValues(Map config, String baseDir, String businessDir) {
+    def proj = config.projectName
+    def svc  = config.serviceName
+    def prodDir  = "${baseDir}/baselines/prod-values/${proj}/${svc}"
+    def prodFile = "${prodDir}/values-prod.yaml"
+    def testFile = "${businessDir}/values-test.yaml"
+
+    if (!fileExists(testFile)) {
+        // 业务 test 文件都没有，没法自动生成；交给后续报错
+        echo "⚠️  业务 deploy/values-test.yaml 不存在，跳过 prod values 自动生成"
+        return
+    }
+
+    echo ""
+    echo "🤖 检测到 prod values 不存在，自动生成模板..."
+    echo "    源文件: ${testFile}"
+    echo "    目标:   ${prodFile}"
+
+    // 1. 拷贝 test → prod，并在文件头加上 prod 注释提示
+    sh """
+        set -e
+        mkdir -p '${prodDir}'
+        cat > '${prodFile}' <<'PRODHEADER'
+# ============================================================
+# 生产配置 - ${proj}/${svc}   Owner: 运维
+# 路径: baselines/prod-values/${proj}/${svc}/values-prod.yaml
+#
+# ⚠️  CI 自动生成（基于业务 deploy/values-test.yaml）
+#     必须 review 以下字段后再放行 prod 部署：
+#       - service.replicas    (test=1, prod 建议 ≥ 2)
+#       - resources.limits    (按压测结果填，避免被 OOM)
+#       - resources.requests  (注意 namespace ResourceQuota)
+#       - java.opts           (Nacos 改成 prod 地址 + JVM heap 加大)
+#       - env                 (LOG_LEVEL=info / API_BASE_URL prod)
+#       - probes              (建议先 tcp 跑稳再换 http)
+#       - hpa / pdb           (生产建议都开)
+#       - affinity            (多副本互斥，podAntiAffinity)
+#
+# 改完后:
+#   cd <运维仓库>
+#   git add baselines/prod-values/${proj}/${svc}/
+#   git commit -m "ops: ${svc} prod 配置 review"
+#   git push origin main
+#   然后 Jenkins ${svc}-prod 重新触发
+# ============================================================
+
+PRODHEADER
+
+        # 把 test values 的内容追加（去掉 test 文件原本的 # ===  Owner: 开发  === 那种文件头）
+        cat '${testFile}' >> '${prodFile}'
+        echo "  ✓ 已生成: ${prodFile}"
+    """
+
+    // 2. 尝试 git commit + push（凭据用 agent clone 时用的同一个）
+    def libCred = env.K8S_DEPLOY_LIB_CRED?.trim() ?: 'github-token-justin'
+    def libBranch = env.K8S_DEPLOY_LIB_BRANCH?.trim() ?: 'main'
+
+    def pushResult = -1
+    try {
+        withCredentials([usernamePassword(credentialsId: libCred,
+                                           usernameVariable: 'GIT_USER',
+                                           passwordVariable: 'GIT_PASS')]) {
+            pushResult = sh(
+                script: """
+                    set +e
+                    cd '${baseDir}'
+                    git config user.name  'jenkins-ci' 2>/dev/null
+                    git config user.email 'jenkins@ci.local' 2>/dev/null
+                    git config credential.helper '!f() { echo username=\$GIT_USER; echo password=\$GIT_PASS; }; f' 2>/dev/null
+
+                    git add 'baselines/prod-values/${proj}/${svc}/values-prod.yaml'
+                    git commit -m '[ci-auto] ${proj}/${svc}: 自动生成 prod values 模板（待运维 review）'
+                    if [ \$? -ne 0 ]; then
+                        echo "  ⚠️  没有变更可提交（可能此前有人已 push 过）"
+                        git config --unset credential.helper 2>/dev/null
+                        exit 99
+                    fi
+
+                    git pull --rebase origin '${libBranch}' 2>&1 || true
+                    git push origin HEAD:'${libBranch}'
+                    rc=\$?
+                    git config --unset credential.helper 2>/dev/null
+                    exit \$rc
+                """,
+                returnStatus: true
+            )
+        }
+    } catch (e) {
+        echo "  ⚠️  git push 异常: ${e.message}"
+        pushResult = -1
+    }
+
+    if (pushResult == 0) {
+        echo "✅ prod values 模板已自动 push 到运维仓库 main 分支"
+    } else {
+        echo "⚠️  自动 push 失败（rc=${pushResult}），可能凭据无写权限或网络问题"
+        echo "    完整文件内容已打印到 console，运维需手工 cp 到运维仓库后 push"
+
+        // push 失败时把完整文件打到 console，运维直接复制
+        echo ""
+        echo "════════════════ 📄 ${prodFile} 完整内容 ════════════════"
+        sh "cat '${prodFile}' || true"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+    }
+}
+
+/**
+ * 生成 prod 部署 fail 时的引导信息（部署被拦下来等运维 review）
+ */
+def generateProdReviewMessage(Map config, String baseDir) {
     def proj = config.projectName
     def svc  = config.serviceName
     def relPath = "baselines/prod-values/${proj}/${svc}/values-prod.yaml"
 
     return """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  ❌ 生产部署失败：${svc} 还没有 prod 配置                              
+║  ⏸  生产部署已暂停（首次接入 prod）                                    
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                        
-║  期望路径（运维仓库）:                                                 
+║  CI 已自动生成 prod values 模板（基于业务 test values）：             
 ║      ${relPath}
 ║                                                                        
-║  原因：开发不能管 prod 副本数 / 资源 / 安全字段，必须由运维管控。     
+║  运维 review 流程：                                                    
 ║                                                                        
-╠══════════════════════════════════════════════════════════════════════╣
-║  🛠 运维操作步骤（在运维仓库 sinozo-shared-library）:                  
-╠══════════════════════════════════════════════════════════════════════╣
+║  ① 检查文件是否已 push 到运维仓库 main 分支                            
+║     git fetch origin main                                              
+║     git log --oneline origin/main | head -3                            
+║     # 看到 [ci-auto] ${svc} 那次 commit 即代表自动 push 成功           
+║     # 没看到 → 从 console 复制完整内容手工创建文件                     
 ║                                                                        
-║  1. clone / pull 运维仓库到本地                                        
-║     git clone <sinozo-shared-library> /tmp/ops-repo                    
-║     cd /tmp/ops-repo                                                   
-║     git pull origin main          # 或者已经 clone 过：直接 pull       
+║  ② 必改字段 review                                                     
+║     vi ${relPath}
+║     必须确认：                                                         
+║       - service.replicas    (建议 ≥ 2)                                  
+║       - resources.limits    (压测后填)                                 
+║       - java.opts Nacos 改 prod                                        
+║       - env LOG_LEVEL=info                                             
+║       - hpa / pdb / affinity 按需开                                    
 ║                                                                        
-║  2. 创建 prod 配置（推荐：从 test 复制再改）                           
-║     mkdir -p baselines/prod-values/${proj}/${svc}                       
-║     cp <业务仓库>/deploy/values-test.yaml \\\\                            
-║        baselines/prod-values/${proj}/${svc}/values-prod.yaml             
-║                                                                        
-║  3. 编辑实际 prod 值（副本数 / 资源 / Nacos 地址 / env）              
-║     vi baselines/prod-values/${proj}/${svc}/values-prod.yaml             
-║                                                                        
-║  4. 提交并 push                                                        
-║     git add baselines/prod-values/${proj}/${svc}/                        
-║     git commit -m "ops: ${svc} prod 配置"                              
+║  ③ commit + push                                                       
+║     git add baselines/prod-values/${proj}/${svc}/                       
+║     git commit -m "ops: ${svc} prod 配置 review"                       
 ║     git push origin main                                               
 ║                                                                        
-║  5. 重新触发 Jenkins ${svc}-prod 即可                                  
+║  ④ 重新触发 Jenkins ${svc}-prod                                        
 ║                                                                        
 ╠══════════════════════════════════════════════════════════════════════╣
-║  ⚠️  push 时遇到冲突怎么办：                                            
-╠══════════════════════════════════════════════════════════════════════╣
-║                                                                        
-║  报错: ! [rejected] main -> main (fetch first)                         
-║                                                                        
-║  原因：另一个运维同事先 push 了                                         
-║                                                                        
-║  解决（按顺序执行）:                                                   
-║     git pull --rebase origin main                                      
-║     # 如果显示 CONFLICT 字样，编辑冲突文件保留你想要的部分              
-║     # 然后:                                                            
-║     git add <冲突文件>                                                  
-║     git rebase --continue                                              
-║     git push origin main                                               
-║                                                                        
-║  极端情况（rebase 太复杂搞不定）:                                       
-║     git rebase --abort       # 放弃 rebase 回到原状                    
-║     git pull origin main     # 用 merge 方式                            
-║     # 解决冲突后:                                                      
-║     git add <冲突文件>                                                  
-║     git commit -m "merge"                                              
-║     git push origin main                                               
-║                                                                        
-║  实在搞不定 → 联系另一位运维确认改动 → 二选一                           
-║                                                                        
-╠══════════════════════════════════════════════════════════════════════╣
-║  💡 注意：                                                             
-║     - 业务仓库下也有 deploy/values-prod.yaml？【会被忽略】不读它       
-║     - prod 配置改动不影响其他服务部署（每服务一个独立文件）             
-║     - Jenkins 是只读运维仓库的，运维 push 不影响其他正在跑的 Job       
+║  💡 后续部署：                                                         
+║     - prod values 文件存在 → 直接部署（不再触发自动生成）              
+║     - 想改 prod 配置 → 编辑 ${relPath} 后 push                         
+║     - prod 改动【不会】影响其他服务（每服务独立文件）                  
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 }
+
 
 
 /**
@@ -417,11 +529,91 @@ def adoptExistingResource(String kind, String resourceName, String namespace, St
 
 
 /**
+ * 解析 namespace（支持项目级覆盖，否则用默认 {project}-{env}）
+ *
+ * 优先级:
+ *   1. baselines/projects/<project>/_overrides.yaml 的 namespaces.<env>  (运维显式配)
+ *   2. ${project}-${env}                                                 (默认约定)
+ *
+ * 用途：兼容历史命名（如 adv 项目的 namespace 是 adv-ops-test 而非 adv-test）
+ *
+ * @return 实际 namespace 字符串
+ */
+def resolveNamespace(Map config, String deployEnv, String baseDir) {
+    def projectOverrides = "${baseDir}/baselines/projects/${config.projectName}/_overrides.yaml"
+    if (fileExists(projectOverrides)) {
+        def ns = parseYamlNestedKey(projectOverrides, 'namespaces', deployEnv)
+        if (ns) {
+            echo "  📌 namespace (项目级覆盖): ${ns}"
+            return ns
+        }
+    }
+    def defaultNs = "${config.projectName}-${deployEnv}"
+    echo "  📌 namespace (默认约定): ${defaultNs}"
+    return defaultNs
+}
+
+/**
+ * 解析 YAML 中嵌套两层的 key（如 namespaces.test 或 image.projects）
+ * 优先用 python3 + PyYAML，兜底 awk 状态机。
+ *
+ * @param file     YAML 文件路径
+ * @param parent   父 key（如 'namespaces'）
+ * @param child    子 key（如 'test'）
+ * @return 字符串值，找不到返回 null
+ */
+def parseYamlNestedKey(String file, String parent, String child) {
+    def value = sh(
+        script: """
+set +e
+F='${file}'
+PARENT='${parent}'
+CHILD='${child}'
+
+# 方案 1: python3 + yaml（精确）
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+    python3 - "\$F" "\$PARENT" "\$CHILD" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f) or {}
+v = (data.get(sys.argv[2]) or {}).get(sys.argv[3])
+if v is not None:
+    print(v)
+PYEOF
+    exit 0
+fi
+
+# 方案 2: awk 兜底
+awk -v parent="\$PARENT" -v child="\$CHILD" '
+BEGIN { in_block=0 }
+\$0 ~ "^"parent":[[:space:]]*\$"  { in_block=1; next }
+in_block && /^[a-zA-Z_]/          { in_block=0 }
+in_block && \$0 ~ "^[[:space:]]+"child"[[:space:]]*:" {
+    line = \$0
+    sub(/^[[:space:]]+/, "", line)
+    sub(/[[:space:]]*#.*\$/, "", line)
+    colon = index(line, ":")
+    if (colon > 0) {
+        v = substr(line, colon+1)
+        gsub(/^[[:space:]]+|[[:space:]]+\$/, "", v)
+        gsub(/^["'"'"']|["'"'"']\$/, "", v)
+        if (v != "") { print v; exit }
+    }
+}
+' "\$F"
+        """,
+        returnStdout: true
+    ).trim()
+    return value ?: null
+}
+
+/**
  * 找出可用的 kubectl 路径
  * Jenkins agent 上 jenkins 用户可能没把 /usr/local/bin 加进 PATH，
  * 优先尝试常见路径 + sudo（跟 helm 调用方式保持一致）
  */
 def resolveKubectl() {
+
     def candidates = [
         "sudo /usr/local/bin/kubectl",
         "sudo /usr/bin/kubectl",
@@ -442,14 +634,64 @@ def resolveKubectl() {
 
 
 /**
- * 部署前预览（仅 prod）
+ * 部署前预览（test/prod 都跑）
+ *
+ * 流程：
+ *   1. helm template 把整个 manifest 渲染出来
+ *   2. 完整文件备份到 ~/.deploy-previews/<env>/<svc>-<tag>-<timestamp>.yaml
+ *   3. console 打印前 100 行（运维快速看，全文在备份文件里）
+ *   4. 自动清理 30 天前的旧备份（cleanup 是 best effort，失败不阻塞）
+ *
+ * 备份位置：
+ *   ~/.deploy-previews/<env>/<svc>-<tag>-<YYYYMMDDHHMMSS>.yaml
+ *   - 跨 Job 共享（agent 用户家目录）
+ *   - 不 git push（只服务器本地保留）
+ *   - 30 天自动清理
+ *
+ * 注意：失败不阻塞部署 (|| true)。这是辅助功能不影响核心。
  */
-def previewConfig(String chartPath, List valuesFiles, String releaseName) {
-
+def previewConfig(String chartPath, List valuesFiles, String releaseName, String deployEnv) {
     def fArgs = valuesFiles.collect { "-f ${it}" }.join(' ')
-    echo "📊 部署配置预览（前 100 行）："
-    sh "sudo /usr/local/bin/helm template ${releaseName} ${chartPath} ${fArgs} | head -100 || true"
+    def previewDir = "\$HOME/.deploy-previews/${deployEnv}"
+    def tag = env.DOCKER_TAG ?: 'unknown'
+    def ts  = new Date().format('yyyyMMddHHmmss')
+    def previewFile = "${previewDir}/${releaseName}-${tag}-${ts}.yaml"
+
+    echo ""
+    echo "📊 部署配置预览（helm template 渲染整个 manifest）"
+
+    sh """
+        set +e
+        mkdir -p '${previewDir}'
+
+        # 渲染完整 manifest 到备份文件（同时把 helm 命令注入的关键字段也带上，跟实际部署一致）
+        sudo /usr/local/bin/helm template ${releaseName} ${chartPath} ${fArgs} \\
+            --set service.name=${releaseName} \\
+            --set service.namespace=${env.SERVICE_NAMESPACE ?: ''} \\
+            --set image.tag=${tag} \\
+            > '${previewFile}' 2>&1
+
+        if [ -s '${previewFile}' ]; then
+            echo ""
+            echo "📁 完整 manifest 已备份: ${previewFile}"
+            echo "   行数: \$(wc -l < '${previewFile}')"
+            echo ""
+            echo "═════════════ 前 100 行预览（全文看备份文件） ═════════════"
+            head -100 '${previewFile}'
+            echo "═══════════════════════════════════════════════════════════════"
+            echo ""
+        else
+            echo "⚠️  helm template 渲染失败（备份文件为空），跳过预览"
+            rm -f '${previewFile}'
+        fi
+
+        # 清理 30 天前的旧备份（best effort）
+        find '\$HOME/.deploy-previews' -type f -name '*.yaml' -mtime +30 -delete 2>/dev/null || true
+
+        true   # 确保 sh 步骤永远成功（预览失败不阻塞部署）
+    """
 }
+
 
 /**
  * 回滚

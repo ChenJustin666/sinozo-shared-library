@@ -19,7 +19,9 @@ def call(Map config, String deployEnv) {
     def baseDir = env.DEPLOY_BASE_DIR
     def projectDir = "${baseDir}/projects/${config.projectName}/${deployEnv}/${config.serviceName}"
     def valuesFile = "${projectDir}/values-${deployEnv}.yaml"
-    def namespace = "${config.projectName}-${deployEnv}"
+    // namespace 走 deployToK8s.resolveNamespace（支持项目级 _overrides.yaml 自定义）
+    def namespace = deployToK8s.resolveNamespace(config, deployEnv, baseDir)
+
 
     echo "📋 初始化: ${config.projectName}/${config.serviceName} (${deployEnv})"
 

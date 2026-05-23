@@ -491,10 +491,14 @@ def resolveDeployBaseDir() {
 }
 
 /**
- * 读取 baselines/_global.yaml 的 image.projects 映射
+ * 读取 image.projects 映射（项目级 _overrides.yaml 优先，全局 _global.yaml 兜底）
+ *
+ * 加载顺序：
+ *   1. baselines/projects/<project>/_overrides.yaml （存在且含 image.projects 时优先用）
+ *   2. baselines/_global.yaml                       （默认）
  *
  * 不依赖 Pipeline Utility Steps 插件（readYaml）
- * 用 awk 解析 YAML 中 image.projects 这一段（简单 key-value 结构）
+ * 用 python3+yaml（首选）或 awk 状态机（兜底）解析
  *
  * 期望的 YAML 片段：
  *   image:
@@ -504,18 +508,57 @@ def resolveDeployBaseDir() {
  *       prod: sinozo-prod
  */
 def readImageProjectsMap() {
-    def globalBaseline = "${env.DEPLOY_BASE_DIR}/baselines/_global.yaml"
-    if (!fileExists(globalBaseline)) {
-        error "❌ 未找到 ${globalBaseline}"
+    def baseDir = env.DEPLOY_BASE_DIR
+    def projectName = env.PROJECT_NAME ?: ''
+
+    // 候选 YAML 文件（按优先级顺序）
+    def candidates = []
+    if (projectName) {
+        def projectOverrides = "${baseDir}/baselines/projects/${projectName}/_overrides.yaml"
+        if (fileExists(projectOverrides)) {
+            candidates << [path: projectOverrides, source: '项目级覆盖']
+        }
+    }
+    def globalBaseline = "${baseDir}/baselines/_global.yaml"
+    if (fileExists(globalBaseline)) {
+        candidates << [path: globalBaseline, source: '全局基线']
     }
 
-    // 优先用 python3 + PyYAML（精确）
-    // 兜底用 awk（简单 key-value 解析，适合扁平结构）
-    // 输出格式：每行 "key=value"
+    if (candidates.isEmpty()) {
+        error "❌ 未找到 baselines/_global.yaml 和任何项目级 _overrides.yaml"
+    }
+
+    // 依次尝试，第一个含 image.projects 的就用它（项目级整体覆盖全局）
+    for (c in candidates) {
+        def map = parseImageProjectsFromFile(c.path)
+        if (map && !map.isEmpty()) {
+            echo "📌 image.projects 来源: ${c.source} (${c.path})"
+            echo "📌 解析到 image.projects 映射: ${map}"
+            return map
+        }
+    }
+
+    error """❌ 未在以下文件解析到 image.projects 映射：
+${candidates.collect { '  - ' + it.path }.join('\n')}
+
+期望的格式：
+  image:
+    projects:
+      dev:  sinozo-test
+      test: sinozo-test
+      prod: sinozo-prod
+"""
+}
+
+/**
+ * 解析单个 YAML 文件的 image.projects 映射
+ * @return 非空 Map（找到了 image.projects 且非空）/ 空 Map（没这个字段或为空）
+ */
+def parseImageProjectsFromFile(String filePath) {
     def kvPairs = sh(
         script: """
-set -e
-F='${globalBaseline}'
+set +e
+F='${filePath}'
 
 # 方案 1：python3 + yaml
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
@@ -564,24 +607,9 @@ in_projects && /^[[:space:]]{0,3}[a-zA-Z]/ { in_projects=0 }
             }
         }
     }
-
-    if (projectMap.isEmpty()) {
-        error """❌ baselines/_global.yaml 中未解析到 image.projects 映射
-
-期望的格式：
-  image:
-    projects:
-      dev:  sinozo-test
-      test: sinozo-test
-      prod: sinozo-prod
-
-实际文件: ${globalBaseline}
-"""
-    }
-
-    echo "📌 解析到 image.projects 映射: ${projectMap}"
     return projectMap
 }
+
 
 /**
  * 判断是否需要构建镜像（在 IMAGE_PROJECT_BUILD 中检查同 tag 是否已存在）
