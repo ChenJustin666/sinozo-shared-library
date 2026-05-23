@@ -89,8 +89,14 @@ def deploy(Map config, String deployEnv, String chartPath,
         previewConfig(chartPath, valuesChain.allFiles, releaseName)
     }
 
-    // 部署前 adopt 既有的 regcred Secret（如果是手工创建的，加上 Helm 标签）
-    adoptExistingSecret('regcred', namespace, releaseName)
+    // 部署前 adopt 既有的资源（手工创建的没有 Helm 标签，会冲突）
+    // 把可能预先存在的同名资源都打上 Helm 标签让 chart 接管
+    adoptExistingResource('secret', 'regcred',                  namespace, releaseName)
+    adoptExistingResource('service', "${releaseName}-svc",      namespace, releaseName)
+    adoptExistingResource('service', releaseName,               namespace, releaseName)
+    adoptExistingResource('deployment', releaseName,            namespace, releaseName)
+    adoptExistingResource('configmap', "${releaseName}-config", namespace, releaseName)
+
 
     sh helmCmd
 
@@ -318,75 +324,97 @@ def validateBusinessValues(List businessFiles, String baseDir, boolean strict) {
 }
 
 /**
- * Adopt 既有的 Secret 加上 Helm 标签
+ * Adopt 既有的 K8s 资源，加上 Helm 标签让 chart 接管
  *
  * 场景：
- *   1. 老服务/手工 kubectl 创建的 regcred 没有 Helm 元数据
+ *   1. 老服务/手工 kubectl 创建的资源没有 Helm 元数据
  *   2. 阿里云 ACK 等托管 K8s 在创建新 namespace 时会自动注入 regcred
- *      （admission controller 从 default ns 复制）
- *   Helm 部署时都会报 "cannot be imported: missing key managed-by"
+ *   3. 之前用 kubectl apply 部署过的服务（Service / Deployment 等）
+ *
+ *   Helm 都会报 "cannot be imported: missing key managed-by"
  *
  * 流程：
  *   1. 先确保 namespace 存在（如果不存在，创建 + 等 admission controller 完成注入）
- *   2. 检查 secret 是否存在；不存在直接返回（让 Helm 自己创建）
- *   3. 检查是否已被 Helm 管理；已管理直接返回
+ *   2. 检查资源是否存在；不存在直接返回
+ *   3. 检查是否已被 Helm 管理；已管理直接返回（幂等，不重复 patch）
  *   4. patch 标签 + annotation 让 Helm 接管
  *
- * 安全：只 patch 标签，不动数据。
+ * 性能：
+ *   - 已 adopt 过的资源会跳过 patch（只查询不修改），无副作用
+ *   - 资源不存在时也只查询一次直接返回
+ *
+ * 安全：只 patch 标签 + annotation，不动数据。
+ *
+ * @param kind        资源类型: secret / service / deployment / configmap / statefulset
+ * @param resourceName 资源名（如 ad-gateway, ad-gateway-svc, regcred）
+ * @param namespace   目标 namespace
+ * @param releaseName Helm release 名（写入 annotation）
  */
-def adoptExistingSecret(String secretName, String namespace, String releaseName) {
+def adoptExistingResource(String kind, String resourceName, String namespace, String releaseName) {
     def kf = env.KUBECONFIG ? "--kubeconfig=${env.KUBECONFIG}" : ""
 
-    // 找 kubectl 路径（agent 上 jenkins 用户可能没在 PATH 里，要走 sudo）
-    def kctl = resolveKubectl()
-    if (!kctl) {
-        echo "  ⚠️  agent 节点未找到 kubectl，跳过 regcred adopt（依赖 helm --create-namespace）"
-        return
+    // 缓存 kubectl 路径在 env，避免每次都重复 resolveKubectl
+    if (!env.KUBECTL_CMD) {
+        def kctl = resolveKubectl()
+        if (!kctl) {
+            // 缓存失败状态，避免后续重复探测
+            env.KUBECTL_CMD = '__NONE__'
+        } else {
+            env.KUBECTL_CMD = kctl
+        }
+    }
+    if (env.KUBECTL_CMD == '__NONE__') {
+        return  // kubectl 不可用，跳过 adopt（首次已经打过 warning）
+    }
+    def kctl = env.KUBECTL_CMD
+
+    // 1. 确保 namespace 存在（只在第一次资源 adopt 时创建）
+    if (!env.NS_ENSURED?.contains(namespace)) {
+        def nsExists = sh(
+            script: "${kctl} get namespace ${namespace} ${kf} >/dev/null 2>&1",
+            returnStatus: true
+        )
+        if (nsExists != 0) {
+            echo "  📦 创建 namespace: ${namespace}（提前创建以触发 admission 注入）"
+            sh "${kctl} create namespace ${namespace} ${kf}"
+            // 等 admission controller 完成 regcred 自动注入（阿里云 ACK 等）
+            sh "sleep 3"
+        }
+        env.NS_ENSURED = (env.NS_ENSURED ?: '') + ',' + namespace
     }
 
-    // 1. 确保 namespace 存在（不存在则创建并等 admission controller 注入完成）
-    def nsExists = sh(
-        script: "${kctl} get namespace ${namespace} ${kf} >/dev/null 2>&1",
-        returnStatus: true
-    )
-    if (nsExists != 0) {
-        echo "  📦 创建 namespace: ${namespace}（提前创建以触发 admission 注入）"
-        sh "${kctl} create namespace ${namespace} ${kf}"
-        // 等 admission controller 完成 regcred 自动注入（阿里云 ACK 等）
-        sh "sleep 3"
-    }
-
-    // 2. 检查 Secret 是否存在
+    // 2. 检查资源是否存在
     def exists = sh(
-        script: "${kctl} get secret ${secretName} -n ${namespace} ${kf} >/dev/null 2>&1",
+        script: "${kctl} get ${kind} ${resourceName} -n ${namespace} ${kf} >/dev/null 2>&1",
         returnStatus: true
     )
     if (exists != 0) {
-        echo "  ℹ️  ${namespace}/${secretName} 不存在，Helm 会自动创建"
+        // 不存在 = 不需要 adopt（Helm 会自动创建）；静默处理避免日志吵
         return
     }
 
-    // 3. 检查是否已被 Helm 管理
+    // 3. 检查是否已被 Helm 管理（已管理直接跳过，幂等）
     def alreadyAdopted = sh(
-        script: """${kctl} get secret ${secretName} -n ${namespace} ${kf} \
+        script: """${kctl} get ${kind} ${resourceName} -n ${namespace} ${kf} \
                    -o jsonpath='{.metadata.labels.app\\.kubernetes\\.io/managed-by}' 2>/dev/null""",
         returnStdout: true
     ).trim()
     if (alreadyAdopted == 'Helm') {
-        echo "  ✓ ${namespace}/${secretName} 已被 Helm 管理"
+        echo "  ✓ ${kind}/${resourceName} 已被 Helm 管理（跳过）"
         return
     }
 
     // 4. patch 标签 + annotation 让 Helm 接管
-    echo "  🔧 Adopt 既有 Secret: ${namespace}/${secretName}（加上 Helm 元数据）"
+    echo "  🔧 Adopt: ${kind}/${resourceName} → Helm release '${releaseName}'"
     sh """
-        ${kctl} label secret ${secretName} -n ${namespace} ${kf} \
-            app.kubernetes.io/managed-by=Helm --overwrite
-        ${kctl} annotate secret ${secretName} -n ${namespace} ${kf} \
+        ${kctl} label ${kind} ${resourceName} -n ${namespace} ${kf} \
+            app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+        ${kctl} annotate ${kind} ${resourceName} -n ${namespace} ${kf} \
             meta.helm.sh/release-name=${releaseName} \
-            meta.helm.sh/release-namespace=${namespace} --overwrite
+            meta.helm.sh/release-namespace=${namespace} --overwrite >/dev/null
     """
 }
+
 
 /**
  * 找出可用的 kubectl 路径
