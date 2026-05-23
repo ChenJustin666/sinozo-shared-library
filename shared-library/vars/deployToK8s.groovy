@@ -320,16 +320,36 @@ def validateBusinessValues(List businessFiles, String baseDir, boolean strict) {
 /**
  * Adopt 既有的 Secret 加上 Helm 标签
  *
- * 场景：namespace 里已有手工创建的 regcred Secret（没有 Helm 元数据），
- *      Helm 部署时会报 "cannot be imported: missing key managed-by" 错误。
- *      这里在部署前给它打上标签，让 Helm 能"接管"它。
+ * 场景：
+ *   1. 老服务/手工 kubectl 创建的 regcred 没有 Helm 元数据
+ *   2. 阿里云 ACK 等托管 K8s 在创建新 namespace 时会自动注入 regcred
+ *      （admission controller 从 default ns 复制）
+ *   Helm 部署时都会报 "cannot be imported: missing key managed-by"
  *
- * 安全：只 patch 标签，不动数据；如果 Secret 不存在 / kubectl 没装也静默跳过。
+ * 流程：
+ *   1. 先确保 namespace 存在（如果不存在，创建 + 等 admission controller 完成注入）
+ *   2. 检查 secret 是否存在；不存在直接返回（让 Helm 自己创建）
+ *   3. 检查是否已被 Helm 管理；已管理直接返回
+ *   4. patch 标签 + annotation 让 Helm 接管
+ *
+ * 安全：只 patch 标签，不动数据。
  */
 def adoptExistingSecret(String secretName, String namespace, String releaseName) {
     def kf = env.KUBECONFIG ? "--kubeconfig ${env.KUBECONFIG}" : ""
 
-    // 1. 检查 Secret 是否存在（不存在直接返回）
+    // 1. 确保 namespace 存在（不存在则创建并等 admission controller 注入完成）
+    def nsExists = sh(
+        script: "kubectl get namespace ${namespace} ${kf} >/dev/null 2>&1",
+        returnStatus: true
+    )
+    if (nsExists != 0) {
+        echo "  📦 创建 namespace: ${namespace}（提前创建以触发 admission 注入）"
+        sh "kubectl create namespace ${namespace} ${kf}"
+        // 等 admission controller 完成 regcred 自动注入（阿里云 ACK 等）
+        sh "sleep 3"
+    }
+
+    // 2. 检查 Secret 是否存在
     def exists = sh(
         script: "kubectl get secret ${secretName} -n ${namespace} ${kf} >/dev/null 2>&1",
         returnStatus: true
@@ -339,7 +359,7 @@ def adoptExistingSecret(String secretName, String namespace, String releaseName)
         return
     }
 
-    // 2. 检查是否已经被 Helm 管理（有 managed-by=Helm 标签）
+    // 3. 检查是否已被 Helm 管理
     def alreadyAdopted = sh(
         script: """kubectl get secret ${secretName} -n ${namespace} ${kf} \
                    -o jsonpath='{.metadata.labels.app\\.kubernetes\\.io/managed-by}' 2>/dev/null""",
@@ -350,7 +370,7 @@ def adoptExistingSecret(String secretName, String namespace, String releaseName)
         return
     }
 
-    // 3. patch 标签 + annotation 让 Helm 接管
+    // 4. patch 标签 + annotation 让 Helm 接管
     echo "  🔧 Adopt 既有 Secret: ${namespace}/${secretName}（加上 Helm 元数据）"
     sh """
         kubectl label secret ${secretName} -n ${namespace} ${kf} \
@@ -360,6 +380,7 @@ def adoptExistingSecret(String secretName, String namespace, String releaseName)
             meta.helm.sh/release-namespace=${namespace} --overwrite
     """
 }
+
 
 /**
  * 部署前预览（仅 prod）
