@@ -89,7 +89,11 @@ def deploy(Map config, String deployEnv, String chartPath,
         previewConfig(chartPath, valuesChain.allFiles, releaseName)
     }
 
+    // 部署前 adopt 既有的 regcred Secret（如果是手工创建的，加上 Helm 标签）
+    adoptExistingSecret('regcred', namespace, releaseName)
+
     sh helmCmd
+
 
     if (!skipHealth) {
         healthCheck(releaseName, namespace)
@@ -314,9 +318,54 @@ def validateBusinessValues(List businessFiles, String baseDir, boolean strict) {
 }
 
 /**
+ * Adopt 既有的 Secret 加上 Helm 标签
+ *
+ * 场景：namespace 里已有手工创建的 regcred Secret（没有 Helm 元数据），
+ *      Helm 部署时会报 "cannot be imported: missing key managed-by" 错误。
+ *      这里在部署前给它打上标签，让 Helm 能"接管"它。
+ *
+ * 安全：只 patch 标签，不动数据；如果 Secret 不存在 / kubectl 没装也静默跳过。
+ */
+def adoptExistingSecret(String secretName, String namespace, String releaseName) {
+    def kf = env.KUBECONFIG ? "--kubeconfig ${env.KUBECONFIG}" : ""
+
+    // 1. 检查 Secret 是否存在（不存在直接返回）
+    def exists = sh(
+        script: "kubectl get secret ${secretName} -n ${namespace} ${kf} >/dev/null 2>&1",
+        returnStatus: true
+    )
+    if (exists != 0) {
+        echo "  ℹ️  ${namespace}/${secretName} 不存在，Helm 会自动创建"
+        return
+    }
+
+    // 2. 检查是否已经被 Helm 管理（有 managed-by=Helm 标签）
+    def alreadyAdopted = sh(
+        script: """kubectl get secret ${secretName} -n ${namespace} ${kf} \
+                   -o jsonpath='{.metadata.labels.app\\.kubernetes\\.io/managed-by}' 2>/dev/null""",
+        returnStdout: true
+    ).trim()
+    if (alreadyAdopted == 'Helm') {
+        echo "  ✓ ${namespace}/${secretName} 已被 Helm 管理"
+        return
+    }
+
+    // 3. patch 标签 + annotation 让 Helm 接管
+    echo "  🔧 Adopt 既有 Secret: ${namespace}/${secretName}（加上 Helm 元数据）"
+    sh """
+        kubectl label secret ${secretName} -n ${namespace} ${kf} \
+            app.kubernetes.io/managed-by=Helm --overwrite
+        kubectl annotate secret ${secretName} -n ${namespace} ${kf} \
+            meta.helm.sh/release-name=${releaseName} \
+            meta.helm.sh/release-namespace=${namespace} --overwrite
+    """
+}
+
+/**
  * 部署前预览（仅 prod）
  */
 def previewConfig(String chartPath, List valuesFiles, String releaseName) {
+
     def fArgs = valuesFiles.collect { "-f ${it}" }.join(' ')
     echo "📊 部署配置预览（前 100 行）："
     sh "sudo /usr/local/bin/helm template ${releaseName} ${chartPath} ${fArgs} | head -100 || true"

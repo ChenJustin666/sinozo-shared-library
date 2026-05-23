@@ -2,17 +2,24 @@
 # ============================================================
 # init-service.sh
 # ============================================================
-# 一键初始化新服务（v5 - 字段对齐 chart 真实结构）
+# 一键初始化新服务（v6 - 业务仓库只输出单个 values-test.yaml）
 #
 # 用法：
 #   ./init-service.sh <project> <service> [type]
 #
-# 设计原则:
-#   1. 默认只开必要字段: service.replicas=1 / resources / java.opts
-#   2. env 留注释占位 (业务按需填)
-#   3. 其他全部 enabled: false，但保留完整结构（一眼看到能调啥）
-#   4. 探针默认 TCP（路径不确定时最稳，不会因为路径错误导致 pod 一直重启）
-#   5. test / prod 副本默认都 1 个（先跑通，prod 副本数运维 review 时再改）
+# 输出：
+#   1. /tmp/<service>-init-XXXXX/（业务仓库用）：
+#      - Dockerfile
+#      - Jenkinsfile
+#      - deploy/values-test.yaml      (含全部 12 字段，开发管)
+#
+#   2. 在【运维仓库本地】生成 prod 占位：
+#      baselines/prod-values/<project>/<service>/values-prod.yaml
+#      (含全部 12 字段，运维管)
+#
+# 设计：
+#   - 业务仓库不放 values.yaml（不必要的 DRY 抽象）
+#   - test/prod 各自独立，字段对齐 12 个，只 cpu/memory 数值不同
 # ============================================================
 
 set -euo pipefail
@@ -49,11 +56,11 @@ mkdir -p "$OUT_DIR/deploy"
 echo -e "${CYAN}🚀 初始化服务: $PROJECT/$SERVICE ($TYPE)${NC}"
 echo ""
 
-# 默认端口（Java 8080；Nodejs 后端 3000；前端 Nginx 80 -- 让用户改）
+# 默认端口（Java 8080；Nodejs 后端 3000；前端 Nginx 80）
 if [ "$TYPE" = "java" ]; then
     DEFAULT_PORT=8080
 else
-    DEFAULT_PORT=3000   # Node.js 后端常用，前端改成 80
+    DEFAULT_PORT=3000
 fi
 
 # ============================================================
@@ -105,87 +112,18 @@ cat >> "$OUT_DIR/Jenkinsfile" <<EOF
 EOF
 echo -e "  ${GREEN}✓${NC} Jenkinsfile"
 
-# ── 1.3 deploy/values.yaml（业务通用配置）──────────────────
-cat > "$OUT_DIR/deploy/values.yaml" <<EOF
-# ============================================================
-# 业务通用配置 (deploy/values.yaml)  Owner: 开发
-# ============================================================
-# ⚠️ CI 自动注入字段（不要写）：
-#    image.name / image.tag / image.registry / namespace
-# ============================================================
-
-# ── 服务端口 ──
-service:
-  port: $DEFAULT_PORT
-
-EOF
-
-if [ "$TYPE" = "java" ]; then
-cat >> "$OUT_DIR/deploy/values.yaml" <<EOF
-# ── Java JVM 通用（环境特化在 values-test.yaml 覆写）──
-java:
-  enabled: true
-  opts: >-
-    -Dspring.application.name=$SERVICE
-    -Xms512m -Xmx1024m
-
-EOF
-fi
-
-cat >> "$OUT_DIR/deploy/values.yaml" <<EOF
-# ============================================================
-# 探针（Liveness/Readiness/Startup）
-# ============================================================
-# ⚠️ 探针配错会导致 pod 一直重启，所以默认关闭，业务方根据实际接口情况开启
-#
-# 如何选 type：
-#   tcp  : 推荐，只探测端口能连通即可（最稳，不依赖业务接口）
-#   http : 业务有专门健康检查接口（如 /actuator/health）才用
-#
-# ⚠️ chart 限制：liveness / readiness / startup 三个探针共用同一个 path
-#                如需差异化路径请联系运维改 chart
-#
-# 启用：改 enabled: true，根据实际改 type / path / port
-# ============================================================
-probes:
-  enabled: false               # 默认关，业务确定路径后改 true
-  type: tcp                    # tcp 不依赖 path（推荐先用 tcp 跑通）
-  path: /health                # type=http 时生效（启动健康检查接口）
-  port: $DEFAULT_PORT
-  liveness:                    # 存活探针：失败会重启容器
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3        # 连续失败 3 次重启
-  readiness:                   # 就绪探针：失败会从 Service 摘除流量
-    periodSeconds: 5
-    timeoutSeconds: 3
-    failureThreshold: 3
-  startup:                     # 启动探针：通过前 liveness/readiness 不工作（保护慢启动）
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 30       # 30 次 * 10 秒 = 5 分钟启动窗口
-
-# ============================================================
-# Prometheus 监控（默认关，要采集指标改 enabled: true）
-# 启用后会在 Pod 加 prometheus.io/scrape 等 annotations
-# ============================================================
-monitoring:
-  enabled: false
-  path: /actuator/prometheus   # Java 默认 actuator 路径；Node 改成自己的 /metrics
-  port: $DEFAULT_PORT
-EOF
-
-echo -e "  ${GREEN}✓${NC} deploy/values.yaml"
-
-# ── 1.4 deploy/values-test.yaml ────────────────────────────
+# ── 1.3 deploy/values-test.yaml（业务测试配置，独立文件）────
 cat > "$OUT_DIR/deploy/values-test.yaml" <<EOF
 # ============================================================
 # 测试环境配置 (deploy/values-test.yaml)  Owner: 开发(自由调)
-# 仅写与 values.yaml 不同的字段
+# ============================================================
+# ⚠️ CI 自动注入字段（不要写）：
+#    image.name / image.tag / image.registry / namespace / service.name
 # ============================================================
 
-# ── 副本数（test 默认 1）──
+# ── 服务端口 + 副本数 ──
 service:
+  port: $DEFAULT_PORT
   replicas: 1
 
 # ── 资源（已开启，根据实际调）──
@@ -198,12 +136,11 @@ resources:
     cpu: 800m
     memory: 2Gi
 
-
 EOF
 
 if [ "$TYPE" = "java" ]; then
 cat >> "$OUT_DIR/deploy/values-test.yaml" <<EOF
-# ── Java JVM 测试覆写（连测试 Nacos）──
+# ── Java JVM（连测试 Nacos）──
 java:
   enabled: true
   opts: >-
@@ -217,7 +154,6 @@ java:
 
 EOF
 fi
-
 
 cat >> "$OUT_DIR/deploy/values-test.yaml" <<EOF
 # ── 业务环境变量（按需填，默认留空）──
@@ -266,8 +202,8 @@ hpa:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
-  cpuTarget: 70                # CPU 利用率超 70% 触发扩容（按 requests 算）
-  memoryTarget: 0              # 0=不启用内存指标；填 80 表示内存占用 80%
+  cpuTarget: 70
+  memoryTarget: 0
 
 # ============================================================
 # PDB 中断保护（默认关，关键服务建议开）
@@ -275,24 +211,16 @@ hpa:
 # ============================================================
 pdb:
   enabled: false
-  minAvailable: 1              # 至少保留 1 个；高可用可设为 50%
-  maxUnavailable: 0            # 二选一，跟 minAvailable 互斥
+  minAvailable: 1
+  maxUnavailable: 0
 
-# ============================================================
-# 节点调度 nodeSelector（默认空）
-# 用法：填实际节点 label 把服务限定调度到指定节点
-# 查看节点标签: kubectl get nodes --show-labels
-# ============================================================
+# ── 节点调度 nodeSelector（默认空）──
 nodeSelector: {}
 # 示例:
 # nodeSelector:
 #   node-pool: test-app
 
-# ============================================================
-# 节点调度 tolerations（默认空）
-# 用法：节点打了 taint 后必须 tolerate 才能调度
-# 查看 taint: kubectl describe node <name> | grep Taints
-# ============================================================
+# ── 节点调度 tolerations（默认空）──
 tolerations: []
 # 示例:
 # tolerations:
@@ -301,10 +229,8 @@ tolerations: []
 #     value: test
 #     effect: NoSchedule
 
-# ============================================================
-# 节点调度 affinity（默认空）
+# ── 节点调度 affinity（默认空）──
 # 常见: podAntiAffinity（多副本互斥）/ podAffinity / nodeAffinity
-# ============================================================
 affinity: {}
 # 示例（多副本互斥）:
 # affinity:
@@ -317,10 +243,7 @@ affinity: {}
 #               app: $SERVICE
 #           topologyKey: kubernetes.io/hostname
 
-# ============================================================
-# Ingress 入口（默认关闭，前端 / 对外 API 才需要）
-# 启用：改 enabled: true 并填 items
-# ============================================================
+# ── Ingress 入口（默认关闭）──
 ingress:
   enabled: false
   items: []
@@ -330,17 +253,15 @@ ingress:
   #     paths:
   #       - path: /
   #         pathType: Prefix
-  #     tls: false              # HTTPS 改 true（先建 TLS Secret）
+  #     tls: false
 EOF
-
 
 echo -e "  ${GREEN}✓${NC} deploy/values-test.yaml"
 
 echo ""
-echo -e "${YELLOW}📋 业务文件清单：${NC}"
+echo -e "${YELLOW}📋 业务文件清单（3 个文件）：${NC}"
 echo -e "  ${GREEN}✓${NC} $OUT_DIR/Dockerfile"
 echo -e "  ${GREEN}✓${NC} $OUT_DIR/Jenkinsfile"
-echo -e "  ${GREEN}✓${NC} $OUT_DIR/deploy/values.yaml"
 echo -e "  ${GREEN}✓${NC} $OUT_DIR/deploy/values-test.yaml"
 
 # ============================================================
@@ -366,8 +287,9 @@ else
 # ⚠️ 占位文件，运维 review 后改实际值再 push
 # ============================================================
 
-# ── 副本数（先 1 跑通，稳定后按业务流量调）──
+# ── 服务端口 + 副本数 ──
 service:
+  port: $DEFAULT_PORT
   replicas: 1
 
 # ── 资源（基于实际压测填写，limits 防失控）──
@@ -445,7 +367,7 @@ hpa:
   minReplicas: 2
   maxReplicas: 10
   cpuTarget: 70
-  memoryTarget: 0              # 0=不用；填 80=内存 80% 触发
+  memoryTarget: 0
 
 # ============================================================
 # PDB 中断保护（默认关，关键服务建议开）
@@ -454,25 +376,17 @@ hpa:
 # ============================================================
 pdb:
   enabled: false
-  minAvailable: 1              # 至少保留 1 个；高可用可设为 50%
-  maxUnavailable: 0            # 二选一，跟 minAvailable 互斥
+  minAvailable: 1
+  maxUnavailable: 0
 
-# ============================================================
-# 节点调度 nodeSelector（默认空）
-# 用法：填实际节点 label 把服务限定调度到指定节点
-# 查看节点标签: kubectl get nodes --show-labels
-# ============================================================
+# ── 节点调度 nodeSelector（默认空）──
 nodeSelector: {}
 # 示例:
 # nodeSelector:
 #   node-pool: prod-app
 #   disk-type: ssd
 
-# ============================================================
-# 节点调度 tolerations（默认空）
-# 用法：节点打了 taint 后必须 tolerate 才能调度
-# 查看 taint: kubectl describe node <name> | grep Taints
-# ============================================================
+# ── 节点调度 tolerations（默认空）──
 tolerations: []
 # 示例:
 # tolerations:
@@ -481,13 +395,8 @@ tolerations: []
 #     value: prod
 #     effect: NoSchedule
 
-# ============================================================
-# 节点调度 affinity（默认空）
-# 常见场景:
-#   1. podAntiAffinity - 同服务多副本不调度同节点（高可用，推荐生产开）
-#   2. podAffinity     - 跟某服务部署同节点（降低跨节点延迟）
-#   3. nodeAffinity    - 复杂节点选择（比 nodeSelector 灵活）
-# ============================================================
+# ── 节点调度 affinity（默认空）──
+# 常见: podAntiAffinity（多副本互斥，推荐生产开）/ podAffinity / nodeAffinity
 affinity: {}
 # 推荐示例（多副本互斥，生产建议开）:
 # affinity:
@@ -500,10 +409,7 @@ affinity: {}
 #               app: $SERVICE
 #           topologyKey: kubernetes.io/hostname
 
-# ============================================================
-# Ingress 入口（默认关）
-# 启用：改 enabled: true 并填 items
-# ============================================================
+# ── Ingress 入口（默认关）──
 ingress:
   enabled: false
   items: []
@@ -513,7 +419,7 @@ ingress:
   #     paths:
   #       - path: /
   #         pathType: Prefix
-  #     tls: true             # HTTPS（需要先有 TLS Secret）
+  #     tls: true
 EOF
 
     echo -e "  ${GREEN}✓${NC} $PROD_FILE"
@@ -528,24 +434,15 @@ ${GREEN}════════════════════════
 ${GREEN}✅ 初始化完成！${NC}
 ${GREEN}═══════════════════════════════════════════════════════════${NC}
 
-📂 已生成：
+📂 已生成（业务仓库 3 个文件 + 运维仓库 1 个文件）：
 
   【业务仓库】 → $OUT_DIR/
-     ├── Dockerfile / Jenkinsfile
-     └── deploy/
-         ├── values.yaml          (端口 / JVM / 探针骨架 / 监控骨架)
-         └── values-test.yaml     (副本=1 / 资源 / JVM-test / env / HPA / Ingress)
+     ├── Dockerfile
+     ├── Jenkinsfile
+     └── deploy/values-test.yaml      (test 全部配置)
 
-  【运维仓库 prod 占位】 → $PROD_FILE
-     默认开启:
-       ✓ replicas: 1
-       ✓ resources (含 limits)
-       ✓ java.opts (生产 Nacos)
-     默认关闭（结构都在，按需改 enabled: true 即可）:
-       ✗ probes / monitoring
-       ✗ hpa / pdb
-       ✗ nodeSelector / tolerations / affinity
-       ✗ ingress
+  【运维仓库】 → $PROD_FILE
+     prod 占位（含 12 字段，与 test 字段对齐，只数值不同）
 
 📋 下一步：
 
