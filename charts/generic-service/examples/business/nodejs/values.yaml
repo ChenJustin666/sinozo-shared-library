@@ -1,0 +1,28 @@
+# ============================================================
+# Node.js / 前端业务通用配置 (deploy/values.yaml)
+# Owner: 开发
+# 范围:  所有环境共享
+# ============================================================
+#
+# 🔵 CI 自动注入字段（不要在任何 yaml 里写）：
+#    image.name / image.tag / image.registry / image.pullSecret / namespace
+#
+# 🔴 运维管字段（写了 CI 拒绝）：
+#    resources.limits / securityContext / strategy / nodeSelector / pdb
+#
+# 🟢 开发可改字段：
+#    service.port / service.replicas
+#    env / config / probes / monitoring
+#    hpa / resources.requests / ingress / configmap
+# ============================================================
+
+# ── 服务端口（前端 Nginx 一般 80，后端 Node API 一般 3000）──
+service:
+  port: 80
+
+# ── 健康探针（前端 Nginx 可不开，后端 API 建议开）──
+# probes:
+#   enabled: true
+#   type: http
+#   path: /health
+#   port: 3000

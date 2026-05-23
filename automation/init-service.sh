@@ -2,86 +2,62 @@
 # ============================================================
 # init-service.sh
 # ============================================================
-# 一键初始化新服务（v2 - 字段所有权契约版）
+# 一键初始化新服务（v5 - 字段对齐 chart 真实结构）
 #
 # 用法：
 #   ./init-service.sh <project> <service> [type]
-#   ./init-service.sh adv ad-gateway java
 #
-# 输出：
-#   1. k8s-deploy 仓库（运维侧）：
-#      - baselines/{project}/{service}/baseline-test.yaml  (按需，先不创建)
-#      - baselines/{project}/{service}/baseline-prod.yaml  (按需，先不创建)
-#
-#   2. /tmp/<service>-init-XXXXX/（给开发，复制到业务仓库根目录）：
-#      - Dockerfile
-#      - Jenkinsfile
-#      - deploy/values.yaml          (业务通用配置)
-#      - deploy/values-test.yaml     (测试环境差异)
-#      - deploy/values-prod.yaml     (生产环境差异)
-#
-# 设计：
-#   - 默认不创建服务级 baseline（90% 服务用 _global 就够）
-#   - 业务 values 模板严格遵守字段所有权契约（不含运维字段）
+# 设计原则:
+#   1. 默认只开必要字段: service.replicas=1 / resources / java.opts
+#   2. env 留注释占位 (业务按需填)
+#   3. 其他全部 enabled: false，但保留完整结构（一眼看到能调啥）
+#   4. 探针默认 TCP（路径不确定时最稳，不会因为路径错误导致 pod 一直重启）
+#   5. test / prod 副本默认都 1 个（先跑通，prod 副本数运维 review 时再改）
 # ============================================================
 
 set -euo pipefail
 
-# ── 颜色 ────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# ── 切换到项目根目录 ────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# ── 参数 ────────────────────────────────────────────────────
 PROJECT="${1:-}"
 SERVICE="${2:-}"
 TYPE="${3:-java}"
 
-# 可通过环境变量覆盖
-GIT_BASE_URL="${GIT_BASE_URL:-http://gitea.example.com}"
-DOCKER_REGISTRY="${DOCKER_REGISTRY:-sinozo}"
-
-# ── 用法 ────────────────────────────────────────────────────
 usage() {
     cat <<EOF
 用法: ./init-service.sh <project> <service> [type]
 
 示例:
   ./init-service.sh adv ad-gateway java
-  ./init-service.sh fcm fc05-api java
   ./init-service.sh adv ad-admin-fe nodejs
-
-参数:
-  project: 项目名（小写字母+数字+连字符）
-  service: 服务名（小写字母+数字+连字符）
-  type:    java | nodejs（默认 java）
-
-环境变量:
-  GIT_BASE_URL     Git 基础 URL（默认 http://gitea.example.com）
-  DOCKER_REGISTRY  镜像仓库前缀（默认 sinozo）
 EOF
     exit 1
 }
 
-# ── 校验 ────────────────────────────────────────────────────
 [ -z "$PROJECT" ] || [ -z "$SERVICE" ] && usage
-
-[[ "$PROJECT" =~ ^[a-z0-9-]+$ ]] || { echo -e "${RED}❌ project 名只能包含小写字母、数字、连字符${NC}"; exit 1; }
-[[ "$SERVICE" =~ ^[a-z0-9-]+$ ]] || { echo -e "${RED}❌ service 名只能包含小写字母、数字、连字符${NC}"; exit 1; }
+[[ "$PROJECT" =~ ^[a-z0-9-]+$ ]] || { echo -e "${RED}❌ project 名只能小写字母+数字+连字符${NC}"; exit 1; }
+[[ "$SERVICE" =~ ^[a-z0-9-]+$ ]] || { echo -e "${RED}❌ service 名只能小写字母+数字+连字符${NC}"; exit 1; }
 [[ "$TYPE" =~ ^(java|nodejs)$ ]] || { echo -e "${RED}❌ type 必须是 java 或 nodejs${NC}"; exit 1; }
 
-# ── 输出目录 ────────────────────────────────────────────────
 OUT_DIR=$(mktemp -d -t "${SERVICE}-init-XXXXXX")
 mkdir -p "$OUT_DIR/deploy"
 
 echo -e "${CYAN}🚀 初始化服务: $PROJECT/$SERVICE ($TYPE)${NC}"
 echo ""
 
+# 默认端口（Java 8080；Nodejs 后端 3000；前端 Nginx 80 -- 让用户改）
+if [ "$TYPE" = "java" ]; then
+    DEFAULT_PORT=8080
+else
+    DEFAULT_PORT=3000   # Node.js 后端常用，前端改成 80
+fi
+
 # ============================================================
-# Part 1：生成业务仓库文件（开发使用）
+# Part 1：业务仓库文件
 # ============================================================
 echo -e "${YELLOW}📦 生成业务仓库文件 → $OUT_DIR/${NC}"
 
@@ -98,10 +74,6 @@ fi
 echo -e "  ${GREEN}✓${NC} Dockerfile"
 
 # ── 1.2 Jenkinsfile ────────────────────────────────────────
-# 设计：
-#   - gitUrl/gitCredId 自动从 Jenkins SCM 拿，不写
-#   - kubeconfigCredId Map 形式，业务方按实际改集群名
-#   - Java 服务必带 jdkTool + mavenTool（不写运维要去配 Tool 才能跑）
 cat > "$OUT_DIR/Jenkinsfile" <<EOF
 @Library('k8s-deploy-lib@main') _
 
@@ -116,7 +88,7 @@ EOF
 if [ "$TYPE" = "java" ]; then
 cat >> "$OUT_DIR/Jenkinsfile" <<'EOF'
 
-    // ── Java 构建工具（Jenkins Manage → Tools 中配置的名字）──
+    // ── Java 构建工具（Jenkins Manage → Tools 里的名字）──
     jdkTool:      'jdk 1.8',           // 改成实际 JDK Tool 名（如 'JDK 17'）
     mavenTool:    'Maven 3.8.8',       // 改成实际 Maven Tool 名
 
@@ -125,7 +97,6 @@ fi
 
 cat >> "$OUT_DIR/Jenkinsfile" <<EOF
     // ── kubeconfig 凭据（按环境分别指定）──
-    // 在 Jenkins Manage → Credentials 中创建 Secret file 类型凭据
     kubeconfigCredId: [
         test: 'test-k8s-cluster',      // ⚠️ 改成实际 Jenkins 凭据 ID
         prod: 'prod-k8s-cluster',      // ⚠️ 改成实际 Jenkins 凭据 ID
@@ -137,77 +108,71 @@ echo -e "  ${GREEN}✓${NC} Jenkinsfile"
 # ── 1.3 deploy/values.yaml（业务通用配置）──────────────────
 cat > "$OUT_DIR/deploy/values.yaml" <<EOF
 # ============================================================
-# 业务通用配置 (deploy/values.yaml)
+# 业务通用配置 (deploy/values.yaml)  Owner: 开发
 # ============================================================
-# Owner：开发
-# 范围：所有环境共享的业务配置
-#
-# ⚠️  字段所有权契约：本文件 + values-{env}.yaml 只能写以下字段：
-#   - service.replicas / service.port
-#   - image.name (image.tag 由 CI 注入)
-#   - java.enabled / java.opts
-#   - env / config
-#   - probes / monitoring
-#   - hpa.minReplicas / hpa.maxReplicas / hpa.cpuTarget
-#   - resources.requests
-#   - ingress / configmap
-#
-# 禁止字段（属于运维，写了 CI 会拒绝）：
-#   namespace / image.registry / image.pullSecret / resources.limits
-#   securityContext / nodeSelector / pdb / strategy 等
-#
-# 完整契约：见 k8s-deploy/docs/FIELD_OWNERSHIP.md
+# ⚠️ CI 自动注入字段（不要写）：
+#    image.name / image.tag / image.registry / namespace
 # ============================================================
 
-# ── 服务基本信息 ─
+# ── 服务端口 ──
 service:
-  port: 8080
-
-# ── 镜像 ─（image.tag 由 CI 自动注入，不要写）
-image:
-  name: $DOCKER_REGISTRY/$SERVICE
+  port: $DEFAULT_PORT
 
 EOF
 
 if [ "$TYPE" = "java" ]; then
-cat >> "$OUT_DIR/deploy/values.yaml" <<'EOF'
-# ── Java 配置 ─
+cat >> "$OUT_DIR/deploy/values.yaml" <<EOF
+# ── Java JVM 通用（环境特化在 values-test.yaml 覆写）──
 java:
   enabled: true
   opts: >-
-    -Dspring.application.name=SERVICE_NAME
-    -Dspring.cloud.nacos.config.server-addr=nacos.internal:8848
-    -Dspring.cloud.nacos.discovery.server-addr=nacos.internal:8848
+    -Dspring.application.name=$SERVICE
     -Xms512m -Xmx1024m
 
-# ── 健康探针 ─
-probes:
-  enabled: true
-  type: http
-  path: /actuator/health
-  port: 8080
-
-# ── Prometheus 监控 ─
-monitoring:
-  enabled: true
-  path: /actuator/prometheus
-  port: 8080
 EOF
-sed -i "s/SERVICE_NAME/$SERVICE/g" "$OUT_DIR/deploy/values.yaml"
 fi
 
-cat >> "$OUT_DIR/deploy/values.yaml" <<'EOF'
+cat >> "$OUT_DIR/deploy/values.yaml" <<EOF
+# ============================================================
+# 探针（Liveness/Readiness/Startup）
+# ============================================================
+# ⚠️ 探针配错会导致 pod 一直重启，所以默认关闭，业务方根据实际接口情况开启
+#
+# 如何选 type：
+#   tcp  : 推荐，只探测端口能连通即可（最稳，不依赖业务接口）
+#   http : 业务有专门健康检查接口（如 /actuator/health）才用
+#
+# ⚠️ chart 限制：liveness / readiness / startup 三个探针共用同一个 path
+#                如需差异化路径请联系运维改 chart
+#
+# 启用：改 enabled: true，根据实际改 type / path / port
+# ============================================================
+probes:
+  enabled: false               # 默认关，业务确定路径后改 true
+  type: tcp                    # tcp 不依赖 path（推荐先用 tcp 跑通）
+  path: /health                # type=http 时生效（启动健康检查接口）
+  port: $DEFAULT_PORT
+  liveness:                    # 存活探针：失败会重启容器
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3        # 连续失败 3 次重启
+  readiness:                   # 就绪探针：失败会从 Service 摘除流量
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:                     # 启动探针：通过前 liveness/readiness 不工作（保护慢启动）
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30       # 30 次 * 10 秒 = 5 分钟启动窗口
 
-# ── 业务环境变量（可选）──
-# env:
-#   - name: LOG_LEVEL
-#     value: info
-
-# ── 业务配置（可选，会渲染为 ConfigMap）──
-# config:
-#   app:
-#     timeout: 10
-#     retries: 3
+# ============================================================
+# Prometheus 监控（默认关，要采集指标改 enabled: true）
+# 启用后会在 Pod 加 prometheus.io/scrape 等 annotations
+# ============================================================
+monitoring:
+  enabled: false
+  path: /actuator/prometheus   # Java 默认 actuator 路径；Node 改成自己的 /metrics
+  port: $DEFAULT_PORT
 EOF
 
 echo -e "  ${GREEN}✓${NC} deploy/values.yaml"
@@ -215,27 +180,29 @@ echo -e "  ${GREEN}✓${NC} deploy/values.yaml"
 # ── 1.4 deploy/values-test.yaml ────────────────────────────
 cat > "$OUT_DIR/deploy/values-test.yaml" <<EOF
 # ============================================================
-# 测试环境配置 (deploy/values-test.yaml)
-# ============================================================
+# 测试环境配置 (deploy/values-test.yaml)  Owner: 开发(自由调)
 # 仅写与 values.yaml 不同的字段
 # ============================================================
 
-# ── 副本数（测试环境最小化）──
+# ── 副本数（test 默认 1）──
 service:
   replicas: 1
 
-# ── 资源 requests（测试环境节省资源）──
+# ── 资源（已开启，根据实际调）──
 resources:
   enabled: true
   requests:
     cpu: 100m
     memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
 
-# ── Java JVM 测试环境覆写 ──
 EOF
 
 if [ "$TYPE" = "java" ]; then
 cat >> "$OUT_DIR/deploy/values-test.yaml" <<EOF
+# ── Java JVM 测试覆写（连测试 Nacos）──
 java:
   opts: >-
     -Dspring.application.name=$SERVICE
@@ -246,45 +213,100 @@ java:
     -Dspring.cloud.nacos.discovery.namespace=$SERVICE-test
     -Xms256m -Xmx512m
 
-# ── 测试环境业务变量 ──
-env:
-  - name: LOG_LEVEL
-    value: debug
 EOF
 fi
 
+cat >> "$OUT_DIR/deploy/values-test.yaml" <<EOF
+# ── 业务环境变量（按需填，默认留空）──
+env: []
+# 示例:
+# env:
+#   - name: LOG_LEVEL
+#     value: debug
+#   - name: API_BASE_URL
+#     value: https://api-test.internal
+
+# ============================================================
+# HPA 自动伸缩（默认关闭）
+# 启用：改 enabled: true，按业务流量定 min/max
+# 注意：开 HPA 后副本数由 K8s 自动调，service.replicas 失效
+# ============================================================
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  cpuTarget: 70                # CPU 利用率超 70% 触发扩容（按 requests 算）
+  memoryTarget: 0              # 0=不启用内存指标；填 80 表示内存占用 80%
+
+# ============================================================
+# Ingress 入口（默认关闭，前端 / 对外 API 才需要）
+# 启用：改 enabled: true 并填 items
+# ============================================================
+ingress:
+  enabled: false
+  items: []
+  # 示例:
+  # items:
+  #   - host: $SERVICE-test.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix
+  #     tls: false              # HTTPS 改 true（先建 TLS Secret）
+EOF
+
 echo -e "  ${GREEN}✓${NC} deploy/values-test.yaml"
 
-# ── 1.5 deploy/values-prod.yaml ────────────────────────────
-cat > "$OUT_DIR/deploy/values-prod.yaml" <<EOF
+echo ""
+echo -e "${YELLOW}📋 业务文件清单：${NC}"
+echo -e "  ${GREEN}✓${NC} $OUT_DIR/Dockerfile"
+echo -e "  ${GREEN}✓${NC} $OUT_DIR/Jenkinsfile"
+echo -e "  ${GREEN}✓${NC} $OUT_DIR/deploy/values.yaml"
+echo -e "  ${GREEN}✓${NC} $OUT_DIR/deploy/values-test.yaml"
+
 # ============================================================
-# 生产环境配置 (deploy/values-prod.yaml)
+# Part 2：运维仓库 prod 占位
+# ============================================================
+PROD_DIR="$PROJECT_ROOT/baselines/prod-values/$PROJECT/$SERVICE"
+PROD_FILE="$PROD_DIR/values-prod.yaml"
+
+echo ""
+echo -e "${YELLOW}🔒 生成 prod 配置占位（运维仓库）：${NC}"
+
+if [ -f "$PROD_FILE" ]; then
+    echo -e "  ${YELLOW}⚠ 已存在，跳过：${NC} $PROD_FILE"
+    echo -e "  ${CYAN}（如需重新生成，先 rm 后再运行）${NC}"
+else
+    mkdir -p "$PROD_DIR"
+
+    cat > "$PROD_FILE" <<EOF
+# ============================================================
+# 生产配置 - $PROJECT/$SERVICE   Owner: 运维
+# 路径: baselines/prod-values/$PROJECT/$SERVICE/values-prod.yaml
+#
+# ⚠️ 占位文件，运维 review 后改实际值再 push
 # ============================================================
 
-# ── 副本数（生产高可用）──
+# ── 副本数（先 1 跑通，稳定后按业务流量调）──
 service:
-  replicas: 3
+  replicas: 1
 
-# ── 资源 requests ──
+# ── 资源（基于实际压测填写，limits 防失控）──
 resources:
   enabled: true
   requests:
     cpu: 500m
     memory: 1Gi
-
-# ── HPA（生产建议开启）──
-hpa:
-  enabled: true
-  minReplicas: 3
-  maxReplicas: 10
-  cpuTarget: 70
+  limits:
+    cpu: 2000m
+    memory: 4Gi
 
 EOF
 
-if [ "$TYPE" = "java" ]; then
-cat >> "$OUT_DIR/deploy/values-prod.yaml" <<EOF
-# ── Java JVM 生产环境覆写 ──
+    if [ "$TYPE" = "java" ]; then
+cat >> "$PROD_FILE" <<EOF
+# ── Java JVM 生产环境（连生产 Nacos）──
 java:
+  enabled: true
   opts: >-
     -Dspring.application.name=$SERVICE
     -Dspring.profiles.active=prod
@@ -295,37 +317,127 @@ java:
     -Xms2g -Xmx4g
     -XX:+UseG1GC
 
-# ── 生产环境业务变量 ──
-env:
-  - name: LOG_LEVEL
-    value: info
 EOF
-fi
-
-echo -e "  ${GREEN}✓${NC} deploy/values-prod.yaml"
-
-# ── 校验生成的 values 是否合规 ─────────────────────────────
-echo ""
-echo -e "${YELLOW}🔍 校验生成的业务 values 是否符合契约...${NC}"
-ALL_PASS=true
-for f in "$OUT_DIR/deploy/values.yaml" "$OUT_DIR/deploy/values-test.yaml" "$OUT_DIR/deploy/values-prod.yaml"; do
-    if ! "$PROJECT_ROOT/automation/values-validate.sh" "$f" >/dev/null 2>&1; then
-        echo -e "  ${RED}✗${NC} $f"
-        ALL_PASS=false
-    else
-        echo -e "  ${GREEN}✓${NC} $(basename $f)"
     fi
-done
-$ALL_PASS && echo -e "  ${GREEN}所有业务 values 符合字段所有权契约${NC}"
+
+    cat >> "$PROD_FILE" <<EOF
+# ── 业务环境变量（按实际填）──
+env: []
+# 示例:
+# env:
+#   - name: LOG_LEVEL
+#     value: info
 
 # ============================================================
-# Part 2：可选 - 创建服务级 baseline 模板（默认跳过）
+# 探针（默认关，确认健康检查接口后再开）
+# ⚠️ prod 探针配错风险大，建议先 type: tcp 跑稳再换 http
 # ============================================================
-echo ""
-echo -e "${YELLOW}📋 服务级 baseline:${NC}"
-echo -e "  ${CYAN}默认不创建（90% 服务用 _global.yaml 就够）${NC}"
-echo -e "  仅当本服务有特殊需求（StatefulSet / 防关联 EIP / 特殊 nodeSelector）时，"
-echo -e "  在 ${CYAN}baselines/$PROJECT/$SERVICE/baseline-{test,prod}.yaml${NC} 创建"
+probes:
+  enabled: false
+  type: tcp                    # tcp / http
+  path: /actuator/health       # type=http 时生效
+  port: $DEFAULT_PORT
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30       # 5 分钟启动窗口
+
+# ── Prometheus 监控（默认关）──
+monitoring:
+  enabled: false
+  path: /actuator/prometheus
+  port: $DEFAULT_PORT
+
+# ============================================================
+# HPA 自动伸缩（默认关，运行稳定后再开）
+# 启用：改 enabled: true
+# ============================================================
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  cpuTarget: 70
+  memoryTarget: 0              # 0=不用；填 80=内存 80% 触发
+
+# ============================================================
+# PDB 中断保护（默认关，关键服务建议开）
+# 作用：节点维护/驱逐时保留至少 minAvailable 个 pod
+# 启用：改 enabled: true（前提：service.replicas >= 2）
+# ============================================================
+pdb:
+  enabled: false
+  minAvailable: 1              # 至少保留 1 个；高可用可设为 50%
+  maxUnavailable: 0            # 二选一，跟 minAvailable 互斥
+
+# ============================================================
+# 节点调度 nodeSelector（默认空）
+# 用法：填实际节点 label 把服务限定调度到指定节点
+# 查看节点标签: kubectl get nodes --show-labels
+# ============================================================
+nodeSelector: {}
+# 示例:
+# nodeSelector:
+#   node-pool: prod-app
+#   disk-type: ssd
+
+# ============================================================
+# 节点调度 tolerations（默认空）
+# 用法：节点打了 taint 后必须 tolerate 才能调度
+# 查看 taint: kubectl describe node <name> | grep Taints
+# ============================================================
+tolerations: []
+# 示例:
+# tolerations:
+#   - key: dedicated
+#     operator: Equal
+#     value: prod
+#     effect: NoSchedule
+
+# ============================================================
+# 节点调度 affinity（默认空）
+# 常见场景:
+#   1. podAntiAffinity - 同服务多副本不调度同节点（高可用，推荐生产开）
+#   2. podAffinity     - 跟某服务部署同节点（降低跨节点延迟）
+#   3. nodeAffinity    - 复杂节点选择（比 nodeSelector 灵活）
+# ============================================================
+affinity: {}
+# 推荐示例（多副本互斥，生产建议开）:
+# affinity:
+#   podAntiAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#       - weight: 100
+#         podAffinityTerm:
+#           labelSelector:
+#             matchLabels:
+#               app: $SERVICE
+#           topologyKey: kubernetes.io/hostname
+
+# ============================================================
+# Ingress 入口（默认关）
+# 启用：改 enabled: true 并填 items
+# ============================================================
+ingress:
+  enabled: false
+  items: []
+  # 示例:
+  # items:
+  #   - host: $SERVICE.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix
+  #     tls: true             # HTTPS（需要先有 TLS Secret）
+EOF
+
+    echo -e "  ${GREEN}✓${NC} $PROD_FILE"
+fi
 
 # ============================================================
 # Part 3：下一步指引
@@ -336,35 +448,55 @@ ${GREEN}════════════════════════
 ${GREEN}✅ 初始化完成！${NC}
 ${GREEN}═══════════════════════════════════════════════════════════${NC}
 
-📂 生成文件位置：
-   ${CYAN}$OUT_DIR/${NC}
-   ├── Dockerfile
-   ├── Jenkinsfile
-   └── deploy/
-       ├── values.yaml
-       ├── values-test.yaml
-       └── values-prod.yaml
+📂 已生成：
 
-📋 下一步操作：
+  【业务仓库】 → $OUT_DIR/
+     ├── Dockerfile / Jenkinsfile
+     └── deploy/
+         ├── values.yaml          (端口 / JVM / 探针骨架 / 监控骨架)
+         └── values-test.yaml     (副本=1 / 资源 / JVM-test / env / HPA / Ingress)
 
-  ${YELLOW}【开发】${NC}把这些文件复制到业务仓库根目录：
+  【运维仓库 prod 占位】 → $PROD_FILE
+     默认开启:
+       ✓ replicas: 1
+       ✓ resources (含 limits)
+       ✓ java.opts (生产 Nacos)
+     默认关闭（结构都在，按需改 enabled: true 即可）:
+       ✗ probes / monitoring
+       ✗ hpa / pdb
+       ✗ nodeSelector / tolerations / affinity
+       ✗ ingress
+
+📋 下一步：
+
+  ${YELLOW}【开发】${NC}把业务文件复制到业务仓库：
     cp -r $OUT_DIR/{Dockerfile,Jenkinsfile,deploy} <业务仓库>/
     cd <业务仓库>
-    git add Dockerfile Jenkinsfile deploy/
-    git commit -m "feat: 容器化部署配置"
-    git push
+    git add . && git commit -m "feat: 部署配置" && git push
 
-  ${YELLOW}【运维】${NC}创建 Jenkins Job：
-    ${SERVICE}-test    (DEPLOY_ENV=test)
-    ${SERVICE}-prod    (DEPLOY_ENV=prod)
-    Pipeline script from SCM → 业务仓库 → Jenkinsfile
+  ${YELLOW}【运维】${NC}review prod 配置并 push：
+    cd $PROJECT_ROOT
+    vi $PROD_FILE
+    git add baselines/prod-values/$PROJECT/$SERVICE/
+    git commit -m "ops: $SERVICE prod 配置"
+    git push origin main
 
   ${YELLOW}【运维】${NC}首次部署：
-    Jenkins → ${SERVICE}-test → Build with Parameters
-      ACTION: deploy
+    Jenkins → $SERVICE-test → ACTION=deploy
 
-🧹 完成后可清理临时目录：
+🧹 清理临时目录:
     rm -rf $OUT_DIR
 
-${GREEN}═══════════════════════════════════════════════════════════${NC}
+${CYAN}═══════════════════════════════════════════════════════════${NC}
+${CYAN}🛡 安全保证: 开发碰不到 prod 配置（无运维仓库 push 权限）${NC}
+${CYAN}🔧 启用字段: enabled: false → true；空 {} / [] 直接填值${NC}
+${CYAN}⚠️ git push 冲突解决:${NC}
+    git pull --rebase origin main
+    # 看到 CONFLICT 编辑文件保留你想要的部分
+    git add <冲突文件> && git rebase --continue
+    git push origin main
+  搞不定:
+    git rebase --abort && git pull origin main
+    git add <冲突文件> && git commit -m "merge" && git push
+${CYAN}═══════════════════════════════════════════════════════════${NC}
 EOF

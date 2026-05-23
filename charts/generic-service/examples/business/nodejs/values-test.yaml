@@ -1,0 +1,34 @@
+# ============================================================
+# Node.js / 前端测试环境配置 (deploy/values-test.yaml)
+# Owner: 开发
+#
+# 测试环境宽松，开发可自由调：副本数 / 资源 / env / ingress
+# 仅写与 values.yaml 不同的字段
+# ============================================================
+
+# ── 副本数 ──
+service:
+  replicas: 1
+
+# ── 资源 requests（前端 Nginx 很省）──
+resources:
+  enabled: true
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# ── 业务环境变量（test 连测试 API）──
+env:
+  - name: NODE_ENV
+    value: test
+  - name: API_BASE_URL
+    value: https://api-test.internal    # ⚠️ 改成你的测试 API 地址
+  - name: LOG_LEVEL
+    value: debug
+
+# ── Ingress（前端通常需要，按需打开）──
+# ingress:
+#   enabled: true
+#   host: my-app-test.example.com
+#   path: /
+#   tls: false

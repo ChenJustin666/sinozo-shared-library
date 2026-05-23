@@ -1,25 +1,32 @@
 /**
  * 部署到 K8s（Helm upgrade --install）
  *
- * ═══ 合并机制（v2，字段所有权契约）═══
+ * ═══ 合并机制 ═══
  * Helm `-f` 后置覆盖，加载顺序：
  *   ① charts/generic-service/values.yaml          (Chart 默认值)
- *   ② baselines/_global.yaml                      (全公司基线 / 必加载)
- *   ③ baselines/{project}/{svc}/baseline-{env}.yaml (服务级基线 / 可选)
- *   ④ <业务仓库>/deploy/values.yaml                (业务通用 / 开发管)
- *   ⑤ <业务仓库>/deploy/values-{env}.yaml          (业务环境 / 开发管)
- *   ⑥ helm --set image.tag=R<commit> ...          (CI 注入)
+ *   ② baselines/_global.yaml                      (全局基线 / 运维管 / 必加载)
+ *   ③ <业务仓库>/deploy/values.yaml                (业务通用 / 开发管)
+ *   ④ values 环境差异（按 deployEnv 分流）：
+ *      - test: <业务仓库>/deploy/values-test.yaml          (开发管)
+ *      - prod: <运维仓库>/baselines/prod-values/<proj>/<svc>/values-prod.yaml  (运维管)
+ *   ⑤ helm --set image.tag=R<commit> ...          (CI 注入)
+ *
+ * ═══ 关键设计：开发改不了 prod ═══
+ * - test 环境：开发在自己业务仓库写，自由调
+ * - prod 环境：业务仓库的 deploy/values-prod.yaml【根本不读】
+ *              运维在运维仓库 baselines/prod-values/ 下管控，开发无 push 权限
+ * - 物理隔离：每服务一个独立文件，互不影响
  *
  * ═══ 旧路径兼容 ═══
- * 如果业务仓库未提供 deploy/ 目录，回退到旧路径：
+ * 业务仓库未提供 deploy/values-test.yaml 时回退到：
  *   projects/{project}/{env}/{svc}/values-{env}.yaml
- * 这样现有服务无需迁移即可继续部署
  *
  * ═══ 支持的 Action ═══
  *   - deploy   : helm upgrade --install + 健康检查
  *   - rollback : helm rollback
  *   - restart  : kubectl rollout restart
  */
+
 def call(Map config, String deployEnv, def params) {
     def baseDir     = env.DEPLOY_BASE_DIR
     def chartPath   = "${baseDir}/charts/generic-service"
@@ -56,8 +63,10 @@ def deploy(Map config, String deployEnv, String chartPath,
     echo "🚀 部署: ${releaseName} → ${namespace} (tag: ${env.DOCKER_TAG})"
     echo "📋 模式: ${valuesChain.mode}"
 
-    // 校验业务 values 不含运维字段（warning 模式，不阻塞）
-    validateBusinessValues(valuesChain.businessFiles, baseDir, deployEnv == 'prod')
+    // 校验业务 values（warning 模式，不阻塞 - 先跑通流程）
+    // 后续上稳定后可改为 prod=strict
+    validateBusinessValues(valuesChain.businessFiles, baseDir, false)
+
 
     // 构建 helm 命令
     def helmCmd = buildHelmCommand(config, chartPath, valuesChain.allFiles,
@@ -111,39 +120,47 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
         echo "  ⚠️  未找到 baselines/_global.yaml，跳过"
     }
 
-    // ── 2. 服务级 baseline（可选）──
-    def serviceBaseline = "${baseDir}/baselines/${config.projectName}/${config.serviceName}/baseline-${deployEnv}.yaml"
-    if (fileExists(serviceBaseline)) {
-        files << serviceBaseline
-        echo "  📎 服务基线: baselines/${config.projectName}/${config.serviceName}/baseline-${deployEnv}.yaml"
-    }
-
-    // ── 3. 业务 values（新模式：业务仓库 deploy/）──
-    // 业务代码已经被 checkout 到 $WORKSPACE
+    // ── 2. 业务通用（业务仓库 deploy/values.yaml）──
+    // 所有环境都加载，业务方写公共配置（端口、健康检查、JVM 默认）
     def businessDir = config.subdirectory ? "${env.WORKSPACE}/${config.subdirectory}/deploy" : "${env.WORKSPACE}/deploy"
     def businessCommon = "${businessDir}/values.yaml"
-    def businessEnv    = "${businessDir}/values-${deployEnv}.yaml"
+    if (fileExists(businessCommon)) {
+        files << businessCommon
+        businessFiles << businessCommon
+        echo "  📎 业务通用: deploy/values.yaml"
+    }
 
-    if (fileExists(businessEnv)) {
-        // 新模式
-        mode = 'new'
-        if (fileExists(businessCommon)) {
-            files << businessCommon
-            businessFiles << businessCommon
-            echo "  📎 业务通用: deploy/values.yaml"
+    // ── 3. 环境差异 ──
+    if (deployEnv == 'prod') {
+        // ⭐ 生产环境：从【运维仓库】读取，开发碰不到
+        // 路径: baselines/prod-values/<project>/<service>/values-prod.yaml
+        def prodValues = "${baseDir}/baselines/prod-values/${config.projectName}/${config.serviceName}/values-prod.yaml"
+        if (fileExists(prodValues)) {
+            mode = 'prod-ops-managed'
+            files << prodValues
+            echo "  📎 生产配置（运维仓库）: baselines/prod-values/${config.projectName}/${config.serviceName}/values-prod.yaml"
+        } else {
+            // prod 配置不存在 → 直接 fail 并给出运维操作指引
+            error generateProdMissingError(config, baseDir, businessDir)
         }
-        files << businessEnv
-        businessFiles << businessEnv
-        echo "  📎 业务环境: deploy/values-${deployEnv}.yaml"
     } else {
-        // ── 4. 兼容旧路径 ──
-        def legacyValues = "${baseDir}/projects/${config.projectName}/${deployEnv}/${config.serviceName}/values-${deployEnv}.yaml"
-        if (fileExists(legacyValues)) {
-            mode = 'legacy'
-            files << legacyValues
-            businessFiles << legacyValues
-            echo "  📎 旧模式 values: projects/${config.projectName}/${deployEnv}/${config.serviceName}/values-${deployEnv}.yaml"
-            echo "  💡 建议迁移到新模式：将 values 移动到业务仓库 deploy/ 目录"
+        // test / dev：从业务仓库读
+        def businessEnv = "${businessDir}/values-${deployEnv}.yaml"
+        if (fileExists(businessEnv)) {
+            mode = 'new'
+            files << businessEnv
+            businessFiles << businessEnv
+            echo "  📎 业务环境: deploy/values-${deployEnv}.yaml"
+        } else {
+            // 兼容旧路径
+            def legacyValues = "${baseDir}/projects/${config.projectName}/${deployEnv}/${config.serviceName}/values-${deployEnv}.yaml"
+            if (fileExists(legacyValues)) {
+                mode = 'legacy'
+                files << legacyValues
+                businessFiles << legacyValues
+                echo "  📎 旧模式 values: projects/${config.projectName}/${deployEnv}/${config.serviceName}/values-${deployEnv}.yaml"
+                echo "  💡 建议迁移：将 values 挪到业务仓库 deploy/values-${deployEnv}.yaml"
+            }
         }
     }
 
@@ -153,6 +170,84 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
         businessFiles: businessFiles,
     ]
 }
+
+/**
+ * 生成"prod 配置缺失"错误信息（含运维操作指引和 git 冲突解决方案）
+ */
+def generateProdMissingError(Map config, String baseDir, String businessDir) {
+    def proj = config.projectName
+    def svc  = config.serviceName
+    def relPath = "baselines/prod-values/${proj}/${svc}/values-prod.yaml"
+
+    return """
+╔══════════════════════════════════════════════════════════════════════╗
+║  ❌ 生产部署失败：${svc} 还没有 prod 配置                              
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                        
+║  期望路径（运维仓库）:                                                 
+║      ${relPath}
+║                                                                        
+║  原因：开发不能管 prod 副本数 / 资源 / 安全字段，必须由运维管控。     
+║                                                                        
+╠══════════════════════════════════════════════════════════════════════╣
+║  🛠 运维操作步骤（在运维仓库 sinozo-shared-library）:                  
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                        
+║  1. clone / pull 运维仓库到本地                                        
+║     git clone <sinozo-shared-library> /tmp/ops-repo                    
+║     cd /tmp/ops-repo                                                   
+║     git pull origin main          # 或者已经 clone 过：直接 pull       
+║                                                                        
+║  2. 创建 prod 配置（推荐：从 test 复制再改）                           
+║     mkdir -p baselines/prod-values/${proj}/${svc}                       
+║     cp <业务仓库>/deploy/values-test.yaml \\\\                            
+║        baselines/prod-values/${proj}/${svc}/values-prod.yaml             
+║                                                                        
+║  3. 编辑实际 prod 值（副本数 / 资源 / Nacos 地址 / env）              
+║     vi baselines/prod-values/${proj}/${svc}/values-prod.yaml             
+║                                                                        
+║  4. 提交并 push                                                        
+║     git add baselines/prod-values/${proj}/${svc}/                        
+║     git commit -m "ops: ${svc} prod 配置"                              
+║     git push origin main                                               
+║                                                                        
+║  5. 重新触发 Jenkins ${svc}-prod 即可                                  
+║                                                                        
+╠══════════════════════════════════════════════════════════════════════╣
+║  ⚠️  push 时遇到冲突怎么办：                                            
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                        
+║  报错: ! [rejected] main -> main (fetch first)                         
+║                                                                        
+║  原因：另一个运维同事先 push 了                                         
+║                                                                        
+║  解决（按顺序执行）:                                                   
+║     git pull --rebase origin main                                      
+║     # 如果显示 CONFLICT 字样，编辑冲突文件保留你想要的部分              
+║     # 然后:                                                            
+║     git add <冲突文件>                                                  
+║     git rebase --continue                                              
+║     git push origin main                                               
+║                                                                        
+║  极端情况（rebase 太复杂搞不定）:                                       
+║     git rebase --abort       # 放弃 rebase 回到原状                    
+║     git pull origin main     # 用 merge 方式                            
+║     # 解决冲突后:                                                      
+║     git add <冲突文件>                                                  
+║     git commit -m "merge"                                              
+║     git push origin main                                               
+║                                                                        
+║  实在搞不定 → 联系另一位运维确认改动 → 二选一                           
+║                                                                        
+╠══════════════════════════════════════════════════════════════════════╣
+║  💡 注意：                                                             
+║     - 业务仓库下也有 deploy/values-prod.yaml？【会被忽略】不读它       
+║     - prod 配置改动不影响其他服务部署（每服务一个独立文件）             
+║     - Jenkins 是只读运维仓库的，运维 push 不影响其他正在跑的 Job       
+╚══════════════════════════════════════════════════════════════════════╝
+"""
+}
+
 
 /**
  * 构建 helm upgrade 命令
@@ -178,8 +273,16 @@ def buildHelmCommand(Map config, String chartPath, List valuesFiles,
         cmd += " --set image.name=${fullImageName}"
     }
 
-    // namespace（pipeline 自动推断 {project}-{env}）
+    // ── CI 注入字段（业务 / 运维 values 都不要写）──
+    // service.name      = 服务名（chart 用它生成 Deployment / Service / ConfigMap 名）
+    // service.namespace = {project}-{env} 自动推断
+    // project           = 项目名（写到 label / annotation）
+    // environment       = 环境名（写到 label / annotation）
+    cmd += " --set service.name=${releaseName}"
     cmd += " --set service.namespace=${namespace}"
+    cmd += " --set project=${config.projectName}"
+    cmd += " --set environment=${env.DEPLOY_ENV}"
+
 
     cmd += " --wait --timeout 300s"
 

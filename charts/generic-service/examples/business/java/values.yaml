@@ -1,0 +1,43 @@
+# ============================================================
+# Java 业务通用配置 (deploy/values.yaml)
+# Owner: 开发
+# 范围:  所有环境共享（test 和 prod 都会读这份）
+# ============================================================
+#
+# 🔵 CI 自动注入字段（不要在任何 yaml 里写）：
+#    image.name / image.tag / image.registry / image.pullSecret / namespace
+#
+# 🔴 运维管字段（写了 CI 拒绝，请去运维仓库 baselines/ 让运维改）：
+#    resources.limits / securityContext / strategy / nodeSelector / pdb
+#
+# 🟢 开发可改字段（写在本文件 + values-{env}.yaml）：
+#    service.port / service.replicas
+#    java.enabled / java.opts
+#    env / config / probes / monitoring
+#    hpa.minReplicas / hpa.maxReplicas / hpa.cpuTarget
+#    resources.requests / ingress / configmap
+# ============================================================
+
+# ── 服务端口 ──
+service:
+  port: 8080
+
+# ── Java 默认 JVM（环境特化在 values-{env}.yaml 里覆写）──
+java:
+  enabled: true
+  opts: >-
+    -Dspring.application.name=ad-gateway
+    -Xms512m -Xmx1024m
+
+# ── 健康探针 ──
+probes:
+  enabled: true
+  type: http
+  path: /actuator/health
+  port: 8080
+
+# ── Prometheus 监控 ──
+monitoring:
+  enabled: true
+  path: /actuator/prometheus
+  port: 8080

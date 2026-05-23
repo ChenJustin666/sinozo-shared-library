@@ -1,0 +1,43 @@
+# ============================================================
+# Java 测试环境配置 (deploy/values-test.yaml)
+# Owner: 开发
+#
+# 测试环境宽松，开发可自由调：副本数 / 资源 / HPA / JVM / env / ingress
+# 仅写与 values.yaml 不同的字段
+# ============================================================
+
+# ── 副本数 ──
+service:
+  replicas: 1
+
+# ── 资源 requests（test 节省）──
+resources:
+  enabled: true
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# ── Java JVM 测试环境覆写（连测试 Nacos）──
+java:
+  opts: >-
+    -Dspring.application.name=ad-gateway
+    -Dspring.profiles.active=test
+    -Dspring.cloud.nacos.config.server-addr=nacos-test.internal:8848
+    -Dspring.cloud.nacos.config.namespace=ad-gateway-test
+    -Dspring.cloud.nacos.discovery.server-addr=nacos-test.internal:8848
+    -Dspring.cloud.nacos.discovery.namespace=ad-gateway-test
+    -Xms256m -Xmx512m
+
+# ── 业务环境变量（test 开 debug）──
+env:
+  - name: LOG_LEVEL
+    value: debug
+  - name: SPRING_PROFILES_ACTIVE
+    value: test
+
+# ── HPA（test 默认不开，按需打开）──
+# hpa:
+#   enabled: true
+#   minReplicas: 1
+#   maxReplicas: 3
+#   cpuTarget: 70

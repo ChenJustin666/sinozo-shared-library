@@ -8,9 +8,6 @@
 
 # ── 镜像基础设施 ────────────────────────────────────────────
 # 多 project 隔离：dev/test 和 prod 用不同的 SWR organization
-# 同一 commit 在 dev 构建时 push 到 test project；
-# 进入 prod 流程时由 Pipeline 自动 promotion（docker tag + push）到 prod project，
-# 不重新构建，保证 layer 完全一致。
 image:
   registry: swr.ap-southeast-3.myhuaweicloud.com
 
@@ -40,12 +37,11 @@ strategy:
     maxSurge: 1
     maxUnavailable: 0
 
-# ── 资源默认值（业务可在 deploy/ 里覆盖 requests，不可覆盖 limits）─
+# ── 资源默认值 ─────────────────────────────────────────────
+# 设计：requests 默认极低（够启动就行），具体值开发在业务 values 里写
+# limits 由 Helm Chart 默认值兜底（charts/generic-service/values.yaml）
 resources:
   enabled: true
-  limits:
-    cpu: "4"
-    memory: 8Gi
   requests:
-    cpu: 256m
-    memory: 512Mi
+    cpu: 100m
+    memory: 256Mi
