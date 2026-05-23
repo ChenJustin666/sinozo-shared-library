@@ -676,34 +676,49 @@ def verifyImageExists(Map cfg, String project) {
 }
 
 /**
- * 解析 kubeconfig 凭据 ID（多集群场景）
+ * 解析 kubeconfig 凭据 ID
  *
- * 同一个 K8s 集群通常承载多个项目；每个环境（test/prod）有不同的集群。
- * 业务方不应该关心集群名，运维统一管理。
+ * 业务 Jenkinsfile 支持 2 种写法：
  *
- * 优先级（从高到低）：
- *   1. 业务 Jenkinsfile 显式指定：k8sDeploy(kubeconfigCredId: 'xxx')
- *      → 适合独立集群（如 big-data 项目用单独的 K8s）
- *   2. Jenkins 全局环境变量 K8S_CRED_<ENV>（运维统一配，最常见）
- *        K8S_CRED_TEST = test-k8s-aliyun-am
- *        K8S_CRED_PROD = prod-k8s-aliyun-am
- *      → 适合多个项目共用同一集群（test 全用一个，prod 全用一个）
- *   3. 旧约定：k8s-{project}-{env}（向后兼容）
- *      → 仅用于过渡期
+ * ① Map 形式（推荐，按环境分别指定）⭐
+ *   k8sDeploy(
+ *       kubeconfigCredId: [
+ *           test: 'test-k8s-aliyun-am',
+ *           prod: 'prod-k8s-aliyun-am',
+ *       ],
+ *   )
  *
- * 例子：
- *   - 共用集群（推荐）：运维配 K8S_CRED_TEST=test-k8s-aliyun-am，
- *     业务方 Jenkinsfile 不传 kubeconfigCredId
- *   - 独立集群：业务方 k8sDeploy(kubeconfigCredId: 'k8s-bigdata-prod')
+ * ② 字符串形式（所有环境用同一个）
+ *   k8sDeploy(kubeconfigCredId: 'k8s-bigdata')
+ *
+ * ③ 不传（按 Jenkins 全局变量 K8S_CRED_<ENV> 自动查找）
+ *   k8sDeploy(...)
+ *
+ * 解析顺序：
+ *   1. cfg.kubeconfigCredId 是 Map → 取 [deployEnv]
+ *   2. cfg.kubeconfigCredId 是非空字符串 → 直接返回
+ *   3. Jenkins 全局变量 K8S_CRED_<ENV>
+ *   4. 旧约定 k8s-{project}-{env}（向后兼容）
  */
 def resolveKubeconfigCred(Map cfg, String deployEnv) {
-    // 优先级 1：业务显式指定
-    if (cfg.kubeconfigCredId?.trim()) {
-        echo "    (来源: Jenkinsfile cfg.kubeconfigCredId)"
-        return cfg.kubeconfigCredId.trim()
+    def credValue = cfg.kubeconfigCredId
+
+    // 优先级 1：Map 形式 - 按环境取
+    if (credValue instanceof Map) {
+        def envSpecific = credValue[deployEnv]
+        if (envSpecific?.toString()?.trim()) {
+            echo "    (来源: Jenkinsfile kubeconfigCredId.${deployEnv})"
+            return envSpecific.toString().trim()
+        }
+        echo "    (cfg.kubeconfigCredId.${deployEnv} 未配置，fallback 到全局变量)"
+    }
+    // 优先级 2：字符串形式 - 所有环境共用
+    else if (credValue instanceof CharSequence && credValue.toString().trim()) {
+        echo "    (来源: Jenkinsfile kubeconfigCredId 字符串)"
+        return credValue.toString().trim()
     }
 
-    // 优先级 2：Jenkins 全局环境变量 K8S_CRED_<ENV>
+    // 优先级 3：Jenkins 全局环境变量 K8S_CRED_<ENV>
     def envKey = "K8S_CRED_${deployEnv.toUpperCase()}"
     def globalCred = env."${envKey}"
     if (globalCred?.trim()) {
@@ -711,9 +726,9 @@ def resolveKubeconfigCred(Map cfg, String deployEnv) {
         return globalCred.trim()
     }
 
-    // 优先级 3：旧约定 k8s-{project}-{env}（向后兼容）
+    // 优先级 4：旧约定 k8s-{project}-{env}（向后兼容）
     def legacyId = "k8s-${cfg.projectName}-${deployEnv}"
-    echo "    (来源: 默认约定 k8s-{project}-{env}，建议运维配置 ${envKey} 简化)"
+    echo "    (来源: 默认约定 k8s-{project}-{env})"
     return legacyId
 }
 
