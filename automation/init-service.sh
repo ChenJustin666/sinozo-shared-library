@@ -205,6 +205,7 @@ if [ "$TYPE" = "java" ]; then
 cat >> "$OUT_DIR/deploy/values-test.yaml" <<EOF
 # ── Java JVM 测试覆写（连测试 Nacos）──
 java:
+  enabled: true
   opts: >-
     -Dspring.application.name=$SERVICE
     -Dspring.profiles.active=test
@@ -217,6 +218,7 @@ java:
 EOF
 fi
 
+
 cat >> "$OUT_DIR/deploy/values-test.yaml" <<EOF
 # ── 业务环境变量（按需填，默认留空）──
 env: []
@@ -226,6 +228,34 @@ env: []
 #     value: debug
 #   - name: API_BASE_URL
 #     value: https://api-test.internal
+
+# ============================================================
+# 探针（默认关，确认健康检查接口后再开）
+# ⚠️ 配错会导致 pod 一直重启，建议先 type:tcp 跑稳再换 http
+# ============================================================
+probes:
+  enabled: false
+  type: tcp                    # tcp / http
+  path: /actuator/health       # type=http 时生效
+  port: $DEFAULT_PORT
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30       # 5 分钟启动窗口
+
+# ── Prometheus 监控（默认关）──
+monitoring:
+  enabled: false
+  path: /actuator/prometheus
+  port: $DEFAULT_PORT
 
 # ============================================================
 # HPA 自动伸缩（默认关闭）
@@ -238,6 +268,54 @@ hpa:
   maxReplicas: 3
   cpuTarget: 70                # CPU 利用率超 70% 触发扩容（按 requests 算）
   memoryTarget: 0              # 0=不启用内存指标；填 80 表示内存占用 80%
+
+# ============================================================
+# PDB 中断保护（默认关，关键服务建议开）
+# 启用：改 enabled: true（前提：service.replicas >= 2）
+# ============================================================
+pdb:
+  enabled: false
+  minAvailable: 1              # 至少保留 1 个；高可用可设为 50%
+  maxUnavailable: 0            # 二选一，跟 minAvailable 互斥
+
+# ============================================================
+# 节点调度 nodeSelector（默认空）
+# 用法：填实际节点 label 把服务限定调度到指定节点
+# 查看节点标签: kubectl get nodes --show-labels
+# ============================================================
+nodeSelector: {}
+# 示例:
+# nodeSelector:
+#   node-pool: test-app
+
+# ============================================================
+# 节点调度 tolerations（默认空）
+# 用法：节点打了 taint 后必须 tolerate 才能调度
+# 查看 taint: kubectl describe node <name> | grep Taints
+# ============================================================
+tolerations: []
+# 示例:
+# tolerations:
+#   - key: dedicated
+#     operator: Equal
+#     value: test
+#     effect: NoSchedule
+
+# ============================================================
+# 节点调度 affinity（默认空）
+# 常见: podAntiAffinity（多副本互斥）/ podAffinity / nodeAffinity
+# ============================================================
+affinity: {}
+# 示例（多副本互斥）:
+# affinity:
+#   podAntiAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#       - weight: 100
+#         podAffinityTerm:
+#           labelSelector:
+#             matchLabels:
+#               app: $SERVICE
+#           topologyKey: kubernetes.io/hostname
 
 # ============================================================
 # Ingress 入口（默认关闭，前端 / 对外 API 才需要）
@@ -254,6 +332,7 @@ ingress:
   #         pathType: Prefix
   #     tls: false              # HTTPS 改 true（先建 TLS Secret）
 EOF
+
 
 echo -e "  ${GREEN}✓${NC} deploy/values-test.yaml"
 
