@@ -148,11 +148,15 @@ updateStrategy:
 serviceAccount:
   name: ""
 
-# ── 安全上下文 ──
-securityContext:
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
+# ── 安全上下文（默认空，容器以镜像 USER 跑）──
+# 想强制非 root 时在业务/运维 values 里填：
+#   securityContext:
+#     runAsUser: 1000
+#     runAsGroup: 1000
+#     fsGroup: 1000
+# 前提：镜像里业务目录 owner 必须是对应 uid，否则 pod 写文件会失败
+securityContext: {}
+
 
 # ── 额外标签和注解 ──
 # extraAnnotations 会同时加到 metadata 和 Pod template

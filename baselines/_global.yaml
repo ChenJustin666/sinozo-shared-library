@@ -23,12 +23,18 @@ image:
   pullSecret: regcred
   pullPolicy: IfNotPresent
 
-# ── 容器安全（合规底线）─────────────────────────────────────
-# 所有容器禁止 root；所有 prod 服务强制非 root 运行
-securityContext:
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
+# ── 容器安全（默认不强制）──────────────────────────────────
+# 默认容器以镜像里的 USER 跑（老服务大多是 root）。
+# 想强制非 root 时，在【运维仓库 prod-values/<svc>/values-prod.yaml】或
+#                  【业务仓库 deploy/values-test.yaml】添加：
+#   securityContext:
+#     runAsUser: 1000
+#     runAsGroup: 1000
+#     fsGroup: 1000
+# 前提：镜像中 /data/apps/<svc> 等业务目录的 owner 是 1000:1000，
+#       否则会因写文件权限不足导致 pod CrashLoopBackOff。
+securityContext: {}
+
 
 # ── 部署策略（零停机）───────────────────────────────────────
 strategy:
