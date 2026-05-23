@@ -335,23 +335,30 @@ def validateBusinessValues(List businessFiles, String baseDir, boolean strict) {
  * 安全：只 patch 标签，不动数据。
  */
 def adoptExistingSecret(String secretName, String namespace, String releaseName) {
-    def kf = env.KUBECONFIG ? "--kubeconfig ${env.KUBECONFIG}" : ""
+    def kf = env.KUBECONFIG ? "--kubeconfig=${env.KUBECONFIG}" : ""
+
+    // 找 kubectl 路径（agent 上 jenkins 用户可能没在 PATH 里，要走 sudo）
+    def kctl = resolveKubectl()
+    if (!kctl) {
+        echo "  ⚠️  agent 节点未找到 kubectl，跳过 regcred adopt（依赖 helm --create-namespace）"
+        return
+    }
 
     // 1. 确保 namespace 存在（不存在则创建并等 admission controller 注入完成）
     def nsExists = sh(
-        script: "kubectl get namespace ${namespace} ${kf} >/dev/null 2>&1",
+        script: "${kctl} get namespace ${namespace} ${kf} >/dev/null 2>&1",
         returnStatus: true
     )
     if (nsExists != 0) {
         echo "  📦 创建 namespace: ${namespace}（提前创建以触发 admission 注入）"
-        sh "kubectl create namespace ${namespace} ${kf}"
+        sh "${kctl} create namespace ${namespace} ${kf}"
         // 等 admission controller 完成 regcred 自动注入（阿里云 ACK 等）
         sh "sleep 3"
     }
 
     // 2. 检查 Secret 是否存在
     def exists = sh(
-        script: "kubectl get secret ${secretName} -n ${namespace} ${kf} >/dev/null 2>&1",
+        script: "${kctl} get secret ${secretName} -n ${namespace} ${kf} >/dev/null 2>&1",
         returnStatus: true
     )
     if (exists != 0) {
@@ -361,7 +368,7 @@ def adoptExistingSecret(String secretName, String namespace, String releaseName)
 
     // 3. 检查是否已被 Helm 管理
     def alreadyAdopted = sh(
-        script: """kubectl get secret ${secretName} -n ${namespace} ${kf} \
+        script: """${kctl} get secret ${secretName} -n ${namespace} ${kf} \
                    -o jsonpath='{.metadata.labels.app\\.kubernetes\\.io/managed-by}' 2>/dev/null""",
         returnStdout: true
     ).trim()
@@ -373,13 +380,37 @@ def adoptExistingSecret(String secretName, String namespace, String releaseName)
     // 4. patch 标签 + annotation 让 Helm 接管
     echo "  🔧 Adopt 既有 Secret: ${namespace}/${secretName}（加上 Helm 元数据）"
     sh """
-        kubectl label secret ${secretName} -n ${namespace} ${kf} \
+        ${kctl} label secret ${secretName} -n ${namespace} ${kf} \
             app.kubernetes.io/managed-by=Helm --overwrite
-        kubectl annotate secret ${secretName} -n ${namespace} ${kf} \
+        ${kctl} annotate secret ${secretName} -n ${namespace} ${kf} \
             meta.helm.sh/release-name=${releaseName} \
             meta.helm.sh/release-namespace=${namespace} --overwrite
     """
 }
+
+/**
+ * 找出可用的 kubectl 路径
+ * Jenkins agent 上 jenkins 用户可能没把 /usr/local/bin 加进 PATH，
+ * 优先尝试常见路径 + sudo（跟 helm 调用方式保持一致）
+ */
+def resolveKubectl() {
+    def candidates = [
+        "sudo /usr/local/bin/kubectl",
+        "sudo /usr/bin/kubectl",
+        "/usr/local/bin/kubectl",
+        "/usr/bin/kubectl",
+        "kubectl",
+    ]
+    for (c in candidates) {
+        def rc = sh(script: "${c} version --client >/dev/null 2>&1", returnStatus: true)
+        if (rc == 0) {
+            echo "  🔧 使用 kubectl: ${c}"
+            return c
+        }
+    }
+    return null
+}
+
 
 
 /**
