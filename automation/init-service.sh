@@ -14,7 +14,7 @@
 #      - deploy/values-test.yaml      (含全部 12 字段，开发管)
 #
 #   2. 在【运维仓库本地】生成 prod 占位：
-#      baselines/prod-values/<project>/<service>/values-prod.yaml
+#      baselines/projects/<project>/<service>/values-prod.yaml
 #      (含全部 12 字段，运维管)
 #
 # 设计：
@@ -267,7 +267,7 @@ echo -e "  ${GREEN}✓${NC} $OUT_DIR/deploy/values-test.yaml"
 # ============================================================
 # Part 2：运维仓库 prod 占位
 # ============================================================
-PROD_DIR="$PROJECT_ROOT/baselines/prod-values/$PROJECT/$SERVICE"
+PROD_DIR="$PROJECT_ROOT/baselines/projects/$PROJECT/$SERVICE"
 PROD_FILE="$PROD_DIR/values-prod.yaml"
 
 echo ""
@@ -282,7 +282,7 @@ else
     cat > "$PROD_FILE" <<EOF
 # ============================================================
 # 生产配置 - $PROJECT/$SERVICE   Owner: 运维
-# 路径: baselines/prod-values/$PROJECT/$SERVICE/values-prod.yaml
+# 路径: baselines/projects/$PROJECT/$SERVICE/values-prod.yaml
 #
 # ⚠️ 占位文件，运维 review 后改实际值再 push
 # ============================================================
@@ -454,7 +454,7 @@ ${GREEN}════════════════════════
   ${YELLOW}【运维】${NC}review prod 配置并 push：
     cd $PROJECT_ROOT
     vi $PROD_FILE
-    git add baselines/prod-values/$PROJECT/$SERVICE/
+    git add baselines/projects/$PROJECT/$SERVICE/
     git commit -m "ops: $SERVICE prod 配置"
     git push origin main
 

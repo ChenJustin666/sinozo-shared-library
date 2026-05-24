@@ -25,7 +25,7 @@ image:
 
 # ── 容器安全（默认不强制）──────────────────────────────────
 # 默认容器以镜像里的 USER 跑（老服务大多是 root）。
-# 想强制非 root 时，在【运维仓库 prod-values/<svc>/values-prod.yaml】或
+# 想强制非 root 时，在【运维仓库 baselines/projects/<svc>/values-prod.yaml】或
 #                  【业务仓库 deploy/values-test.yaml】添加：
 #   securityContext:
 #     runAsUser: 1000

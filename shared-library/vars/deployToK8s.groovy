@@ -8,13 +8,13 @@
  *   ③ <业务仓库>/deploy/values.yaml                (业务通用 / 开发管)
  *   ④ values 环境差异（按 deployEnv 分流）：
  *      - test: <业务仓库>/deploy/values-test.yaml          (开发管)
- *      - prod: <运维仓库>/baselines/prod-values/<proj>/<svc>/values-prod.yaml  (运维管)
+ *      - prod: <运维仓库>/baselines/projects/<proj>/<svc>/values-prod.yaml  (运维管)
  *   ⑤ helm --set image.tag=R<commit> ...          (CI 注入)
  *
  * ═══ 关键设计：开发改不了 prod ═══
  * - test 环境：开发在自己业务仓库写，自由调
  * - prod 环境：业务仓库的 deploy/values-prod.yaml【根本不读】
- *              运维在运维仓库 baselines/prod-values/ 下管控，开发无 push 权限
+ *              运维在运维仓库 baselines/projects/ 下管控，开发无 push 权限
  * - 物理隔离：每服务一个独立文件，互不影响
  *
  * ═══ 旧路径兼容 ═══
@@ -157,12 +157,12 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
     // ── 3. 环境差异 ──
     if (deployEnv == 'prod') {
         // ⭐ 生产环境：从【运维仓库】读取，开发碰不到
-        // 路径: baselines/prod-values/<project>/<service>/values-prod.yaml
-        def prodValues = "${baseDir}/baselines/prod-values/${config.projectName}/${config.serviceName}/values-prod.yaml"
+        // 路径: baselines/projects/<project>/<service>/values-prod.yaml
+        def prodValues = "${baseDir}/baselines/projects/${config.projectName}/${config.serviceName}/values-prod.yaml"
         if (fileExists(prodValues)) {
             mode = 'prod-ops-managed'
             files << prodValues
-            echo "  📎 生产配置（运维仓库）: baselines/prod-values/${config.projectName}/${config.serviceName}/values-prod.yaml"
+            echo "  📎 生产配置（运维仓库）: baselines/projects/${config.projectName}/${config.serviceName}/values-prod.yaml"
         } else {
             // prod 配置不存在 → 自动从业务 test values 生成 prod 模板 + 尝试 push
             // 不管 push 是否成功，本次部署都 fail，等运维 review 后再触发
@@ -216,7 +216,7 @@ def resolveValuesChain(Map config, String deployEnv, String baseDir) {
 def autoGenerateProdValues(Map config, String baseDir, String businessDir) {
     def proj = config.projectName
     def svc  = config.serviceName
-    def prodDir  = "${baseDir}/baselines/prod-values/${proj}/${svc}"
+    def prodDir  = "${baseDir}/baselines/projects/${proj}/${svc}"
     def prodFile = "${prodDir}/values-prod.yaml"
     def testFile = "${businessDir}/values-test.yaml"
 
@@ -238,7 +238,7 @@ def autoGenerateProdValues(Map config, String baseDir, String businessDir) {
         cat > '${prodFile}' <<'PRODHEADER'
 # ============================================================
 # 生产配置 - ${proj}/${svc}   Owner: 运维
-# 路径: baselines/prod-values/${proj}/${svc}/values-prod.yaml
+# 路径: baselines/projects/${proj}/${svc}/values-prod.yaml
 #
 # ⚠️  CI 自动生成（基于业务 deploy/values-test.yaml）
 #     必须 review 以下字段后再放行 prod 部署：
@@ -253,7 +253,7 @@ def autoGenerateProdValues(Map config, String baseDir, String businessDir) {
 #
 # 改完后:
 #   cd <运维仓库>
-#   git add baselines/prod-values/${proj}/${svc}/
+#   git add baselines/projects/${proj}/${svc}/
 #   git commit -m "ops: ${svc} prod 配置 review"
 #   git push origin main
 #   然后 Jenkins ${svc}-prod 重新触发
@@ -283,7 +283,7 @@ PRODHEADER
                     git config user.email 'jenkins@ci.local' 2>/dev/null
                     git config credential.helper '!f() { echo username=\$GIT_USER; echo password=\$GIT_PASS; }; f' 2>/dev/null
 
-                    git add 'baselines/prod-values/${proj}/${svc}/values-prod.yaml'
+                    git add 'baselines/projects/${proj}/${svc}/values-prod.yaml'
                     git commit -m '[ci-auto] ${proj}/${svc}: 自动生成 prod values 模板（待运维 review）'
                     if [ \$? -ne 0 ]; then
                         echo "  ⚠️  没有变更可提交（可能此前有人已 push 过）"
@@ -326,7 +326,7 @@ PRODHEADER
 def generateProdReviewMessage(Map config, String baseDir) {
     def proj = config.projectName
     def svc  = config.serviceName
-    def relPath = "baselines/prod-values/${proj}/${svc}/values-prod.yaml"
+    def relPath = "baselines/projects/${proj}/${svc}/values-prod.yaml"
 
     return """
 ╔══════════════════════════════════════════════════════════════════════╗
@@ -354,7 +354,7 @@ def generateProdReviewMessage(Map config, String baseDir) {
 ║       - hpa / pdb / affinity 按需开                                    
 ║                                                                        
 ║  ③ commit + push                                                       
-║     git add baselines/prod-values/${proj}/${svc}/                       
+║     git add baselines/projects/${proj}/${svc}/                       
 ║     git commit -m "ops: ${svc} prod 配置 review"                       
 ║     git push origin main                                               
 ║                                                                        

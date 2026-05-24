@@ -1,6 +1,6 @@
 # ============================================================
 # 生产配置 - adv/ad-gateway   Owner: 运维
-# 路径: baselines/prod-values/adv/ad-gateway/values-prod.yaml
+# 路径: baselines/projects/adv/ad-gateway/values-prod.yaml
 #
 # ⚠️ 占位文件，运维 review 后改实际值再 push
 # ============================================================

@@ -20,7 +20,7 @@
 ③ baselines/projects/<project>/_overrides.yaml   项目级（存在才加载） ← 本目录
 ④ <业务仓库>/deploy/values.yaml                  业务通用
 ⑤ <业务仓库>/deploy/values-<env>.yaml            业务环境
-⑥ baselines/prod-values/<project>/<svc>/...     prod 运维管
+⑥ baselines/projects/<project>/<svc>/...     prod 运维管
 ⑦ helm --set image.tag ...                      CI 注入
 ```
 
@@ -40,7 +40,7 @@ Helm `-f` 后置覆盖：项目级写了的 key 覆盖全局，不写的字段�
 
 ❌ 不应该用：
 - 写业务字段（端口、resources、env、JVM）→ 应该写到 `<业务仓库>/deploy/`
-- 写 prod 配置（副本数、HPA、PDB）→ 应该写到 `baselines/prod-values/<project>/<svc>/`
+- 写 prod 配置（副本数、HPA、PDB）→ 应该写到 `baselines/projects/<project>/<svc>/`
 
 ## 完整模板（按需保留）
 
@@ -113,5 +113,5 @@ sudo helm uninstall <service> -n adv-test --kubeconfig=...
 | `image.registry/projects/pullSecret` | 运维 | `baselines/_global.yaml` 或 `baselines/projects/<proj>/_overrides.yaml` |
 | `namespaces` | 运维 | `baselines/projects/<proj>/_overrides.yaml`（默认走 `{proj}-{env}`） |
 | `service.port/replicas/probes/env/java` | 开发 | `<业务仓库>/deploy/values-<env>.yaml` |
-| `prod 配置（副本数/资源/HPA）` | 运维 | `baselines/prod-values/<proj>/<svc>/values-prod.yaml` |
+| `prod 配置（副本数/资源/HPA）` | 运维 | `baselines/projects/<proj>/<svc>/values-prod.yaml` |
 | `image.tag/name/createPullSecret` | CI 注入 | helm --set 自动 |
