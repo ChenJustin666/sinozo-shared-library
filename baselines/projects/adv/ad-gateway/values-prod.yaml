@@ -1,0 +1,163 @@
+# ============================================================
+# 生产配置 - adv/ad-gateway   Owner: 运维
+# 路径: baselines/projects/adv/ad-gateway/values-prod.yaml
+#
+# ⚠️  CI 自动生成（基于业务 deploy/values-test.yaml）
+#     必须 review 以下字段后再放行 prod 部署：
+#       - service.replicas    (test=1, prod 建议 ≥ 2)
+#       - resources.limits    (按压测结果填，避免被 OOM)
+#       - resources.requests  (注意 namespace ResourceQuota)
+#       - java.opts           (Nacos 改成 prod 地址 + JVM heap 加大)
+#       - env                 (LOG_LEVEL=info / API_BASE_URL prod)
+#       - probes              (建议先 tcp 跑稳再换 http)
+#       - hpa / pdb           (生产建议都开)
+#       - affinity            (多副本互斥，podAntiAffinity)
+#
+# 改完后:
+#   cd <运维仓库>
+#   git add baselines/projects/adv/ad-gateway/
+#   git commit -m "ops: ad-gateway prod 配置 review"
+#   git push origin main
+#   然后 Jenkins ad-gateway-prod 重新触发
+# ============================================================
+
+# 测试环境配置 (deploy/values-test.yaml)  Owner: 开发 
+# ============================================================
+# ⚠️ CI 自动注入字段（不要写）：
+#    image.name / image.tag / image.registry / namespace / service.name
+# ============================================================
+
+# ── 服务端口 + 副本数 ──
+service:
+  port: 9099
+  replicas: 1
+
+# ── 资源（已开启，根据压测实际调）──
+resources:
+  enabled: true
+  requests:
+    cpu: 300m
+    memory: 1Gi
+  limits:
+    cpu: 800m
+    memory: 2Gi
+
+# ── Java JVM（连测试 Nacos ）──（ ⚠️注意JVM少于limits）
+java:
+  enabled: true
+  opts: >-
+      -XX:+UseContainerSupport
+      -XX:MaxRAMPercentage=72.0
+      -XX:MaxMetaspaceSize=256m
+      -XX:InitialRAMPercentage=30.0
+      -XX:MaxGCPauseMillis=200
+      -XX:+HeapDumpOnOutOfMemoryError
+      -XX:HeapDumpPath=/tmp/heapdump.hprof
+      -XX:+UseG1GC
+      -Djava.security.egd=file:/dev/./urandom
+      -Dfile.encoding=UTF-8
+      -DNACOS_SERVERS=nacos-clusterip.nacos.svc.cluster.local:8848
+      -DNACOS_NAMESPACE=adv_test
+      -DNACOS_GROUP=DEFAULT_GROUP
+      -DNACOS_USERNAME=admin
+      -DNACOS_PASSWORD=123456
+      -Dspring.profiles.active=test
+
+# ── 业务环境变量（按需填，默认留空）──   ⚠️注意参数尽量通过env 变量外部化 
+env: []
+# 示例:
+# env:
+#   - name: LOG_LEVEL
+#     value: debug
+#   - name: API_BASE_URL
+#     value: https://api-test.internal
+
+# ============================================================
+# 探针（默认关，确认健康检查接口后再开）
+# ⚠️ 配错会导致 pod 一直重启，建议先 type:tcp 跑稳再换 http
+# ============================================================
+probes:
+  enabled: false
+  type: tcp                    # tcp / http
+  path: /actuator/health       # type=http 时生效
+  port: 8080
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30       # 5 分钟启动窗口
+
+# ── Prometheus 监控（默认关）──
+monitoring:
+  enabled: false
+  path: /actuator/prometheus
+  port: 8080
+
+# ============================================================
+# HPA 自动伸缩（默认关闭）
+# 启用：改 enabled: true，按业务流量定 min/max
+# 注意：开 HPA 后副本数由 K8s 自动调，service.replicas 失效
+# ============================================================
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  cpuTarget: 70
+  memoryTarget: 0
+
+# ============================================================
+# PDB 中断保护（默认关，关键服务建议开）
+# 启用：改 enabled: true（前提：service.replicas >= 2）
+# ============================================================
+pdb:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: 0
+
+# ── 节点调度 nodeSelector（默认空）──
+nodeSelector: {}
+# 示例:
+# nodeSelector:
+#   node-pool: test-app
+
+# ── 节点调度 tolerations（默认空）──
+tolerations: []
+# 示例:
+# tolerations:
+#   - key: dedicated
+#     operator: Equal
+#     value: test
+#     effect: NoSchedule
+
+# ── 节点调度 affinity（默认空）──
+# 常见: podAntiAffinity（多副本互斥）/ podAffinity / nodeAffinity
+affinity: {}
+# 示例（多副本互斥）:
+# affinity:
+#   podAntiAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#       - weight: 100
+#         podAffinityTerm:
+#           labelSelector:
+#             matchLabels:
+#               app: ad-gateway
+#           topologyKey: kubernetes.io/hostname
+
+# ── Ingress 入口（默认关闭）──
+ingress:
+  enabled: false
+  items: []
+  # 示例:
+  # items:
+  #   - host: ad-gateway-test.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix
+  #     tls: false
