@@ -452,9 +452,13 @@ def resolveDeployBaseDir() {
             sh """
                 cd ${runtimeDir}
                 git config credential.helper '!f() { echo username=\$GIT_USER; echo password=\$GIT_PASS; }; f'
-                git fetch --depth 1 origin ${libBranch} 2>&1 || true
-                git reset --hard origin/${libBranch} 2>&1 || true
+                # 注意：git fetch --depth 1 origin <branch> 只更新 FETCH_HEAD，不会更新 origin/<branch>
+                # 必须显式 +refspec 强制更新远程跟踪分支，避免 reset 用到旧引用
+                git fetch --depth 1 --force origin +refs/heads/${libBranch}:refs/remotes/origin/${libBranch} 2>&1 || true
+                git reset --hard FETCH_HEAD 2>&1 || true
+                git clean -fd 2>&1 || true
                 git config --unset credential.helper 2>/dev/null || true
+
             """
         }
     } else {
