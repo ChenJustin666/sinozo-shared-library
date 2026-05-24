@@ -53,13 +53,16 @@ def deploy(Map config, String deployEnv, String chartPath,
     // 解析 values 文件链
     def valuesChain = resolveValuesChain(config, deployEnv, baseDir)
 
-    if (valuesChain.businessFiles.isEmpty()) {
-        error """❌ 找不到业务 values 文件
+    // ── prod 不强制要求业务 values（设计：开发碰不到 prod，全走运维仓库）──
+    // ── 非 prod (test/dev) 必须要有业务 values（业务方在自己仓库 deploy/ 下管理）──
+    if (deployEnv != 'prod' && valuesChain.businessFiles.isEmpty()) {
+        error """❌ 找不到业务 values 文件（${deployEnv} 环境必须）
 请在以下任一位置创建：
   新模式（推荐）：业务仓库根目录的 deploy/values-${deployEnv}.yaml
   旧模式（兼容）：${baseDir}/projects/${config.projectName}/${deployEnv}/${config.serviceName}/values-${deployEnv}.yaml
 """
     }
+
 
     echo "🚀 部署: ${releaseName} → ${namespace} (tag: ${env.DOCKER_TAG})"
     echo "📋 模式: ${valuesChain.mode}"
