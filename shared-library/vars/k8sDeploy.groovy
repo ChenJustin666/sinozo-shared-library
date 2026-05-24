@@ -269,21 +269,14 @@ def call(Map config) {
                 }
             }
 
-            stage('生产部署审批') {
-                when {
-                    allOf {
-                        expression { params.ACTION == 'deploy' }
-                        expression { params.DEPLOY_ENV == 'prod' }
-                    }
-                }
-                steps {
-                    script {
-                        prodApproval(cfg)
-                    }
-                }
-            }
+            // 「生产部署审批」stage 当前未启用（公司还没接入审批流）
+            // 如需启用：
+            //   1. 在此处加回 stage 块（参考下面 prodApproval 函数实现）
+            //   2. 配置 Jenkins 全局变量 PROD_APPROVERS、PROD_APPROVAL_TIMEOUT
+            // 函数 prodApproval() 仍保留在文件末尾，方便后续直接接入
 
             stage('部署到 K8s') {
+
                 steps {
                     script {
                         def kubeCred = resolveKubeconfigCred(cfg, params.DEPLOY_ENV)
