@@ -310,9 +310,14 @@ PRODHEADER
 
     if (pushResult == 0) {
         echo "✅ prod values 模板已自动 push 到运维仓库 main 分支"
+        echo "    运维仓库 commit: [ci-auto] ${proj}/${svc}: 自动生成 prod values 模板（待运维 review）"
     } else {
-        echo "⚠️  自动 push 失败（rc=${pushResult}），可能凭据无写权限或网络问题"
-        echo "    完整文件内容已打印到 console，运维需手工 cp 到运维仓库后 push"
+        echo "⚠️  自动 push 失败（rc=${pushResult}），可能原因："
+        echo "      - 凭据 ${libCred} 无 push 权限"
+        echo "      - 远端有新 commit，rebase 冲突"
+        echo "      - 网络问题"
+        echo ""
+        echo "    完整文件内容已打印到 console，运维参考下方命令手工补：" 
 
         // push 失败时把完整文件打到 console，运维直接复制
         echo ""
@@ -320,7 +325,17 @@ PRODHEADER
         sh "cat '${prodFile}' || true"
         echo "═══════════════════════════════════════════════════════════════════"
         echo ""
+        echo "运维手工补操作（在运维仓库执行）："
+        echo "    cd <运维仓库>"
+        echo "    mkdir -p baselines/projects/${proj}/${svc}"
+        echo "    vi baselines/projects/${proj}/${svc}/values-prod.yaml   # 复制上面 console 内容"
+        echo "    git pull --rebase origin main"
+        echo "    git add baselines/projects/${proj}/${svc}/"
+        echo "    git commit -m 'ops: ${svc} prod values 模板（手工补 + review）'"
+        echo "    git push origin main"
+        echo ""
     }
+
 }
 
 /**
