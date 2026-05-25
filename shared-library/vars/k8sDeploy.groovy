@@ -116,16 +116,30 @@ def call(Map config) {
                 }
             }
 
-            stage('解析镜像目标 + 计算 tag') {
+            // ────────────────────────────────────────────────────────────────
+            // 「定位运行时资产」: rollback / restart / deploy 都需要
+            //   作用：拉运维仓库的 baselines/charts/_overrides.yaml 到 agent
+            //   resolveNamespace 需要它，所以即使 rollback/restart 也得跑
+            //   restart/rollback 用最少的代价跑这个 stage
+            // ────────────────────────────────────────────────────────────────
+            stage('定位运行时资产') {
                 steps {
                     script {
-                        // ═══ 自动定位 DEPLOY_BASE_DIR ═══
-                        // Jenkins 加载 Shared Library 时已自动 clone 整个仓库到：
-                        //   ${WORKSPACE}@libs/<library-name>/
-                        // 这个目录里有完整的 baselines/ charts/ automation/，无需运维手动 clone
                         env.DEPLOY_BASE_DIR = resolveDeployBaseDir()
                         echo "📍 DEPLOY_BASE_DIR (自动定位): ${env.DEPLOY_BASE_DIR}"
+                    }
+                }
+            }
 
+            // ────────────────────────────────────────────────────────────────
+            // 「解析镜像目标 + 计算 tag」: 仅 ACTION=deploy 才需要
+            //   restart 不构建/不切镜像，rollback 用 helm rollback 走 release 历史
+            //   两者都不需要 git checkout / docker tag / IMAGE_PROJECT
+            // ────────────────────────────────────────────────────────────────
+            stage('解析镜像目标 + 计算 tag') {
+                when { expression { params.ACTION == 'deploy' } }
+                steps {
+                    script {
                         // ═══ Checkout 策略 ═══
                         // Jenkins "Pipeline from SCM" 模式已自动 checkout（Declarative: Checkout SCM）
                         // 默认情况下不重复 checkout，直接复用 workspace
@@ -209,13 +223,17 @@ def call(Map config) {
                 }
             }
 
+            // 仅 ACTION=deploy 需要做 initDeploy（git pull 运维仓库）
+            // restart/rollback 不依赖运维仓库代码版本
             stage('初始化') {
+                when { expression { params.ACTION == 'deploy' } }
                 steps {
                     script {
                         initDeploy(cfg, params.DEPLOY_ENV)
                     }
                 }
             }
+
 
             stage('构建镜像（按需）') {
                 when {
@@ -275,41 +293,53 @@ def call(Map config) {
             //   2. 配置 Jenkins 全局变量 PROD_APPROVERS、PROD_APPROVAL_TIMEOUT
             // 函数 prodApproval() 仍保留在文件末尾，方便后续直接接入
 
+            // ────────────────────────────────────────────────────────────────
+            // 「部署到 K8s」: 三种 ACTION 走不同分支
+            //   - deploy:   helm upgrade --install + Docker pull secret + Nacos 凭据
+            //   - rollback: helm rollback (只需 kubeconfig)
+            //   - restart:  kubectl rollout restart (只需 kubeconfig)
+            // ────────────────────────────────────────────────────────────────
             stage('部署到 K8s') {
-
                 steps {
                     script {
                         def kubeCred = resolveKubeconfigCred(cfg, params.DEPLOY_ENV)
                         echo "🔑 使用 kubeconfig 凭据: ${kubeCred}"
 
                         withCredentials([file(credentialsId: kubeCred, variable: 'KUBECONFIG')]) {
-                            withCredentials([usernamePassword(
-                                credentialsId: cfg.dockerCredId,
-                                usernameVariable: 'DOCKER_USER',
-                                passwordVariable: 'DOCKER_PASS'
-                            )]) {
-                                def authStr = "${env.DOCKER_USER}:${env.DOCKER_PASS}".bytes.encodeBase64().toString()
-                                def dockerJson = """{"auths":{"${cfg.dockerRegistry}":{"username":"${env.DOCKER_USER}","password":"${env.DOCKER_PASS}","auth":"${authStr}"}}}"""
-                                env.PULL_SECRET_DATA = dockerJson.bytes.encodeBase64().toString()
+                            if (params.ACTION == 'deploy') {
+                                // deploy 完整链路：Docker pull secret + 可选 Nacos 凭据
+                                withCredentials([usernamePassword(
+                                    credentialsId: cfg.dockerCredId,
+                                    usernameVariable: 'DOCKER_USER',
+                                    passwordVariable: 'DOCKER_PASS'
+                                )]) {
+                                    def authStr = "${env.DOCKER_USER}:${env.DOCKER_PASS}".bytes.encodeBase64().toString()
+                                    def dockerJson = """{"auths":{"${cfg.dockerRegistry}":{"username":"${env.DOCKER_USER}","password":"${env.DOCKER_PASS}","auth":"${authStr}"}}}"""
+                                    env.PULL_SECRET_DATA = dockerJson.bytes.encodeBase64().toString()
 
-                                if (cfg.nacosCredId) {
-                                    withCredentials([usernamePassword(
-                                        credentialsId: cfg.nacosCredId,
-                                        usernameVariable: 'NACOS_USER',
-                                        passwordVariable: 'NACOS_PASS'
-                                    )]) {
-                                        env.NACOS_USERNAME = env.NACOS_USER
-                                        env.NACOS_PASSWORD = env.NACOS_PASS
+                                    if (cfg.nacosCredId) {
+                                        withCredentials([usernamePassword(
+                                            credentialsId: cfg.nacosCredId,
+                                            usernameVariable: 'NACOS_USER',
+                                            passwordVariable: 'NACOS_PASS'
+                                        )]) {
+                                            env.NACOS_USERNAME = env.NACOS_USER
+                                            env.NACOS_PASSWORD = env.NACOS_PASS
+                                            deployToK8s(cfg, params.DEPLOY_ENV, params)
+                                        }
+                                    } else {
                                         deployToK8s(cfg, params.DEPLOY_ENV, params)
                                     }
-                                } else {
-                                    deployToK8s(cfg, params.DEPLOY_ENV, params)
                                 }
+                            } else {
+                                // restart / rollback：只需要 kubeconfig，不读 Docker / Nacos 凭据
+                                deployToK8s(cfg, params.DEPLOY_ENV, params)
                             }
                         }
                     }
                 }
             }
+
         }
 
         post {
