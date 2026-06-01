@@ -796,16 +796,58 @@ def helmDiff(String chartPath, List valuesFiles, String releaseName, String name
 
 /**
  * 回滚
+ *
+ * 流程：
+ *   1. 展示当前 release 的版本历史（最近 10 个）
+ *   2. 显示回滚目标版本详情（镜像 tag、时间、状态）
+ *   3. 执行回滚
+ *   4. 回滚后再展示一次当前版本（确认已回滚）
  */
 def rollback(String releaseName, String namespace, def params) {
     def revision = params.ROLLBACK_REVISION ?: '0'
-    echo "⏪ 回滚: ${releaseName} → revision ${revision}"
+    def kf = env.KUBECONFIG ? "--kubeconfig ${env.KUBECONFIG}" : ""
 
+    echo ""
+    echo "⏪ 回滚: ${releaseName} (目标 revision: ${revision == '0' ? '上一个版本' : revision})"
+
+    // ── 1. 展示版本历史 ──
+    echo ""
+    echo "═════════════ 版本历史（最近 10 次部署） ═════════════"
+    sh """
+        sudo /usr/local/bin/helm history ${releaseName} -n ${namespace} ${kf} --max 10 2>&1 || echo "⚠️  无法获取版本历史"
+    """
+    echo "═══════════════════════════════════════════════════════════════"
+
+    // ── 2. 显示回滚目标版本详情 ──
+    if (revision == '0') {
+        echo ""
+        echo "ℹ️  将回滚到上一个 superseded 版本"
+    } else {
+        echo ""
+        echo "ℹ️  将回滚到 revision ${revision}"
+        sh """
+            echo "--- revision ${revision} 详情 ---"
+            sudo /usr/local/bin/helm get values ${releaseName} -n ${namespace} ${kf} --revision ${revision} 2>&1 | head -20 || true
+            echo "--- 镜像 tag ---"
+            sudo /usr/local/bin/helm get values ${releaseName} -n ${namespace} ${kf} --revision ${revision} 2>&1 | grep 'tag:' || true
+        """
+    }
+
+    // ── 3. 执行回滚 ──
     def cmd = "sudo /usr/local/bin/helm rollback ${releaseName} ${revision} -n ${namespace}"
     if (env.KUBECONFIG) {
         cmd += " --kubeconfig ${env.KUBECONFIG}"
     }
     sh cmd
+
+    // ── 4. 回滚后确认 ──
+    echo ""
+    echo "═════════════ 回滚后当前版本 ═════════════"
+    sh """
+        sudo /usr/local/bin/helm history ${releaseName} -n ${namespace} ${kf} --max 3 2>&1 || true
+    """
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "✅ 回滚完成"
 }
 
 /**
