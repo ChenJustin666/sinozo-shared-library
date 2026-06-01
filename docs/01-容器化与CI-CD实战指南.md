@@ -4,6 +4,27 @@
 
 ---
 
+
+标准	你的实现	评价
+Build Once, Deploy Many	镜像只构建 1 次，prod 通过 Promotion 流转	业界最佳实践
+Image Promotion	docker pull + tag + push，layer 复用	与 Google gcrane copy 同理念
+权限隔离	prod 白名单 + prod values 在独立仓库	物理隔离，开发碰不到
+Values 分层覆盖	5 层合并链（chart default → global → business common → env → CI inject）	Helm 标准模式
+字段所有权	values-validate.sh 校验业务不写运维字段	防止职责混乱
+幂等部署	adoptExistingResource + helm upgrade --install	多次运行结果一致
+部署前预览	helm template 备份 + helm diff（新增）	变更前可见
+健康检查	helm --wait + kubectl rollout status	部署失败有感知
+回滚能力	ACTION=rollback + ROLLBACK_REVISION	可快速恢复
+可以补齐的（业界标准但当前缺）
+缺失项	业界标准	你的现状	优先级
+镜像安全扫描	Trivy/Snyk 扫描 CVE	无	中
+生产审批流	prod 部署前人工确认	代码已有但未启用	低（你说了还没接入）
+部署通知	企业微信/钉钉/Slack	只有 Jenkins console	低
+Git Tag 自动打	prod 成功后自动打 v1.0.0-R<commit>	无	低
+--atomic 自动回滚	helm upgrade --atomic 失败自动 rollback	手动 rollback	低
+docker login 安全	--password-stdin	-p $DOCKER_PASS（命令行暴露）	中
+
+
 ## 一、我们目前是怎么部署的
 
 ### 1.1 传统部署方式（当前现状）

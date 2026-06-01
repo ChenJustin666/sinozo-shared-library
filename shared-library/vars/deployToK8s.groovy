@@ -678,13 +678,13 @@ def resolveKubectl() {
  *
  * 流程：
  *   1. helm template 把整个 manifest 渲染出来
- *   2. 完整文件备份到 ~/.deploy-previews/<env>/<svc>-<tag>-<timestamp>.yaml
+ *   2. 完整文件备份到 /data/backup/deploy-previews/<env>/<svc>-<tag>-<timestamp>.yaml
  *   3. console 打印前 100 行（运维快速看，全文在备份文件里）
  *   4. 自动清理 30 天前的旧备份（cleanup 是 best effort，失败不阻塞）
  *
  * 备份位置：
- *   ~/.deploy-previews/<env>/<svc>-<tag>-<YYYYMMDDHHMMSS>.yaml
- *   - 跨 Job 共享（agent 用户家目录）
+ *   /data/backup/deploy-previews/<env>/<svc>-<tag>-<YYYYMMDDHHMMSS>.yaml
+ *   - 固定路径，跨 Job 统一保留
  *   - 不 git push（只服务器本地保留）
  *   - 30 天自动清理
  *
@@ -692,7 +692,8 @@ def resolveKubectl() {
  */
 def previewConfig(String chartPath, List valuesFiles, String releaseName, String deployEnv) {
     def fArgs = valuesFiles.collect { "-f ${it}" }.join(' ')
-    def previewDir = "\$HOME/.deploy-previews/${deployEnv}"
+    // 固定备份路径（不依赖 WORKSPACE 或 HOME，跨 Job 统一保留）
+    def previewDir = "/data/backup/deploy-previews/${deployEnv}"
     def tag = env.DOCKER_TAG ?: 'unknown'
     def ts  = new Date().format('yyyyMMddHHmmss')
     def previewFile = "${previewDir}/${releaseName}-${tag}-${ts}.yaml"
@@ -702,31 +703,32 @@ def previewConfig(String chartPath, List valuesFiles, String releaseName, String
 
     sh """
         set +e
-        mkdir -p '${previewDir}'
+        sudo mkdir -p "${previewDir}"
+        sudo chmod 777 "${previewDir}" 2>/dev/null || true
 
         # 渲染完整 manifest 到备份文件（同时把 helm 命令注入的关键字段也带上，跟实际部署一致）
         sudo /usr/local/bin/helm template ${releaseName} ${chartPath} ${fArgs} \\
             --set service.name=${releaseName} \\
             --set service.namespace=${env.SERVICE_NAMESPACE ?: ''} \\
             --set image.tag=${tag} \\
-            > '${previewFile}' 2>&1
+            > "${previewFile}" 2>&1
 
-        if [ -s '${previewFile}' ]; then
+        if [ -s "${previewFile}" ]; then
             echo ""
             echo "📁 完整 Manifest 已备份: ${previewFile}"
-            echo "   行数: \$(wc -l < '${previewFile}')"
+            echo "   行数: \$(wc -l < "${previewFile}")"
             echo ""
             echo "═════════════ 前 100 行预览（全文看备份文件） ═════════════"
-            head -100 '${previewFile}'
+            head -100 "${previewFile}"
             echo "═══════════════════════════════════════════════════════════════"
             echo ""
         else
             echo "⚠️  helm template 渲染失败（备份文件为空），跳过预览"
-            rm -f '${previewFile}'
+            rm -f "${previewFile}"
         fi
 
         # 清理 30 天前的旧备份（best effort）
-        find '\$HOME/.deploy-previews' -type f -name '*.yaml' -mtime +30 -delete 2>/dev/null || true
+        find "/data/backup/deploy-previews" -type f -name '*.yaml' -mtime +30 -delete 2>/dev/null || true
 
         true   # 确保 sh 步骤永远成功（预览失败不阻塞部署）
     """
