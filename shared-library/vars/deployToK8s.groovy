@@ -94,14 +94,36 @@ def deploy(Map config, String deployEnv, String chartPath,
     //   3. 30 天前的备份自动清理
     previewConfig(chartPath, valuesChain.allFiles, releaseName, deployEnv)
 
+    // ── prod 部署前 helm diff 预览（显示本次变更内容）──
+    if (deployEnv == 'prod') {
+        helmDiff(chartPath, valuesChain.allFiles, releaseName, namespace)
+    }
 
     // 部署前 adopt 既有的资源（手工创建的没有 Helm 标签，会冲突）
     // 把可能预先存在的同名资源都打上 Helm 标签让 chart 接管
-    adoptExistingResource('secret', 'regcred',                  namespace, releaseName)
-    adoptExistingResource('service', "${releaseName}-svc",      namespace, releaseName)
-    adoptExistingResource('service', releaseName,               namespace, releaseName)
-    adoptExistingResource('deployment', releaseName,            namespace, releaseName)
-    adoptExistingResource('configmap', "${releaseName}-config", namespace, releaseName)
+    //
+    // ── prod 智能跳过策略 ──
+    //   - release 已存在（helm status 成功）→ 跳过 adopt（资源已被 Helm 管理，节省 10+ 次 kubectl）
+    //   - release 不存在（首次部署）或运维手工改过资源 → 必须跑 adopt（防止冲突）
+    //   - test/dev 永远跑 adopt（手工调试多，资源可能被手动改）
+    def kf = env.KUBECONFIG ? "--kubeconfig ${env.KUBECONFIG}" : ""
+    def releaseExists = false
+    if (deployEnv == 'prod') {
+        releaseExists = sh(
+            script: "sudo /usr/local/bin/helm status ${releaseName} -n ${namespace} ${kf} >/dev/null 2>&1",
+            returnStatus: true
+        ) == 0
+    }
+
+    if (releaseExists) {
+        echo "  ⏭️  prod release 已存在，跳过 adoptExistingResource（资源已被 Helm 管理）"
+    } else {
+        adoptExistingResource('secret', 'regcred',                  namespace, releaseName)
+        adoptExistingResource('service', "${releaseName}-svc",      namespace, releaseName)
+        adoptExistingResource('service', releaseName,               namespace, releaseName)
+        adoptExistingResource('deployment', releaseName,            namespace, releaseName)
+        adoptExistingResource('configmap', "${releaseName}-config", namespace, releaseName)
+    }
 
 
     sh helmCmd
@@ -691,7 +713,7 @@ def previewConfig(String chartPath, List valuesFiles, String releaseName, String
 
         if [ -s '${previewFile}' ]; then
             echo ""
-            echo "📁 完整 manifest 已备份: ${previewFile}"
+            echo "📁 完整 Manifest 已备份: ${previewFile}"
             echo "   行数: \$(wc -l < '${previewFile}')"
             echo ""
             echo "═════════════ 前 100 行预览（全文看备份文件） ═════════════"
@@ -707,6 +729,65 @@ def previewConfig(String chartPath, List valuesFiles, String releaseName, String
         find '\$HOME/.deploy-previews' -type f -name '*.yaml' -mtime +30 -delete 2>/dev/null || true
 
         true   # 确保 sh 步骤永远成功（预览失败不阻塞部署）
+    """
+}
+
+/**
+ * Helm Diff 预览（仅 prod 部署前调用）
+ *
+ * 显示本次部署与当前运行版本的差异（类似 git diff）
+ * 需要 helm-diff 插件：helm plugin install https://github.com/databus23/helm-diff
+ *
+ * 流程：
+ *   1. 检查 helm-diff 插件是否已安装
+ *   2. 执行 helm diff upgrade 对比当前 release 与即将部署的版本
+ *   3. 输出变更内容（运维确认后再继续）
+ *
+ * 注意：
+ *   - 插件未安装时跳过（不阻塞部署）
+ *   - 首次部署（release 不存在）时跳过 diff
+ *   - 失败不阻塞部署 (|| true)
+ */
+def helmDiff(String chartPath, List valuesFiles, String releaseName, String namespace) {
+    def fArgs = valuesFiles.collect { "-f ${it}" }.join(' ')
+    def kf = env.KUBECONFIG ? "--kubeconfig ${env.KUBECONFIG}" : ""
+    def tag = env.DOCKER_TAG ?: 'unknown'
+
+    echo ""
+    echo "🔍 Helm Diff 预览（对比当前 release 与即将部署的版本）"
+
+    sh """
+        set +e
+
+        # 1. 检查 helm-diff 插件是否已安装
+        if ! sudo /usr/local/bin/helm plugin list 2>/dev/null | grep -q diff; then
+            echo "⚠️  helm-diff 插件未安装，跳过 diff 预览"
+            echo "   安装命令: helm plugin install https://github.com/databus23/helm-diff"
+            exit 0
+        fi
+
+        # 2. 检查 release 是否存在（首次部署无 diff 可看）
+        if ! sudo /usr/local/bin/helm status ${releaseName} -n ${namespace} ${kf} >/dev/null 2>&1; then
+            echo "ℹ️  首次部署（release 不存在），跳过 diff"
+            exit 0
+        fi
+
+        # 3. 执行 helm diff
+        echo ""
+        echo "═════════════ Helm Diff（本次变更内容） ═════════════"
+        sudo /usr/local/bin/helm diff upgrade ${releaseName} ${chartPath} ${fArgs} \\
+            --set service.name=${releaseName} \\
+            --set service.namespace=${namespace} \\
+            --set image.tag=${tag} \\
+            --set project=${env.PROJECT_NAME ?: ''} \\
+            --set environment=${env.DEPLOY_ENV ?: ''} \\
+            -n ${namespace} ${kf} \\
+            --allow-unreleased \\
+            2>&1 || true
+        echo "═══════════════════════════════════════════════════════════════"
+        echo ""
+
+        true   # 确保 sh 步骤永远成功
     """
 }
 
