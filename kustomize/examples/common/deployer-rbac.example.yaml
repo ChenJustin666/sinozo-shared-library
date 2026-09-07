@@ -1,0 +1,80 @@
+# Apply after replacing PROJECT_ENV and SERVICE_ACCOUNT_NAME.
+# The default pipeline can create regcred when it is absent, so this Role
+# includes the minimum Secret verbs needed by ensureRegistrySecret. If regcred
+# is managed by SealedSecret/ExternalSecret, remove this rule and set
+# manageRegistrySecret=false in the Jenkinsfile.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: SERVICE_ACCOUNT_NAME
+  namespace: PROJECT_ENV
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-kustomize-deployer
+  namespace: PROJECT_ENV
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["bitnami.com"]
+    resources: ["sealedsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-kustomize-deployer
+  namespace: PROJECT_ENV
+subjects:
+  - kind: ServiceAccount
+    name: SERVICE_ACCOUNT_NAME
+    namespace: PROJECT_ENV
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jenkins-kustomize-deployer
+---
+# Optional cluster-scoped permission required only when manageNamespace=true.
+# It is intentionally separate so a platform can omit it after pre-creating
+# namespaces and setting manageNamespace=false.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: jenkins-kustomize-namespace-creator
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: jenkins-kustomize-namespace-creator
+subjects:
+  - kind: ServiceAccount
+    name: SERVICE_ACCOUNT_NAME
+    namespace: PROJECT_ENV
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: jenkins-kustomize-namespace-creator

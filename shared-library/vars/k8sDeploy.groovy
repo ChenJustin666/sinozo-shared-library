@@ -1,23 +1,21 @@
 /**
- * k8sDeploy - K8s 通用部署入口（Helm + values.yaml）
+ * k8sDeploy - K8s 通用部署入口（Kustomize + kubectl）
  *
  * ═══ 核心设计 ═══
  * 1. 镜像 Build Once, Deploy Many
  *    每个 commit 只构建 1 次。第一次部署到非 prod 环境时构建，后续环境复用。
  *
- * 2. 多 SWR project 隔离 + Image Promotion
- *    test 和 prod 用不同的 SWR project（如 sinozo-test / sinozo-prod）
- *    prod 部署前自动用 docker tag + push 把镜像从 test project 提升到 prod project
- *    （不重新构建，layer 完全复用）
+ * 2. 单 SWR organization + 可选 Image Promotion
+ *    默认 test/prod 都使用 sinozo，生产直接复用同一不可变 tag。
+ *    项目显式配置不同 organization 时才执行 docker tag + push promotion。
  *
- * 3. 兼容 1/2/3 环境
- *    - 3 环境 dev/test/prod：dev 构建，test/prod 复用
- *    - 2 环境 test/prod（多数现有服务）：test 构建，prod 复用 + promotion
- *    - 1 环境 prod：报错（不允许，至少要有一个非 prod 环境构建）
+ * 3. 两环境模型
+ *    - test：开发人员可选择任意已发现分支并构建/部署
+ *    - prod：仅管理员/运维白名单触发，固定 PROD_BRANCH，只复用 test 已验证镜像
  *
- * 4. 字段所有权契约
- *    - 业务 values 在业务仓库 deploy/，运维基线在 k8s-deploy/baselines/
- *    - CI 部署前自动校验
+ * 4. 配置所有权契约
+ *    - 业务仓库管理 base、test/prod overlay 和唯一 Jenkinsfile
+ *    - CI 只在临时目录注入镜像和 namespace
  *
  * ═══ 使用方式（极简，业务方不用配 git）═══
  * @Library('k8s-deploy-lib@main') _
@@ -54,6 +52,12 @@ def call(Map config) {
         mavenGoals:       'clean package -DskipTests',
         subdirectory:     '',
         nacosCredId:      '',
+        // sealed: Secret由Git中的SealedSecret生成（默认）；jenkins: 兼容旧项目
+        nacosSecretMode:  'sealed',
+        // regcred 已存在时复用，不存在时用 Jenkins Docker 凭据幂等创建
+        manageRegistrySecret: true,
+        // namespace 已存在时复用，不存在时自动创建
+        manageNamespace:     true,
     ]
 
     def cfg = [:]
@@ -76,14 +80,18 @@ def call(Map config) {
             choice(
                 name: 'DEPLOY_ENV',
                 choices: inferEnvChoices(),
-                description: '部署环境（默认从 Job 名末段自动推断：xxx-dev / xxx-test / xxx-prod）'
+                description: '部署环境（仅 test/prod；由 Job 名末段绑定）'
             )
+            // Requires Jenkins Git Parameter plugin. The list is loaded from
+            // the Pipeline SCM repository; prod is still hard-locked below.
             gitParameter(
-                branchFilter: 'origin/(.*)',
-                defaultValue: "${cfg.defaultBranch}",
                 name: 'GIT_BRANCH',
-                type: 'PT_BRANCH_TAG',
-                description: '分支或 Tag'
+                type: 'PT_BRANCH',
+                branchFilter: 'origin/(.*)',
+                defaultValue: resolveDefaultGitBranch(cfg.defaultBranch),
+                selectedValue: 'DEFAULT',
+                sortMode: 'DESCENDING_SMART',
+                description: 'test 可动态选择仓库分支；prod 只能使用管理员配置的 PROD_BRANCH'
             )
             choice(
                 name: 'ACTION',
@@ -93,12 +101,34 @@ def call(Map config) {
             string(
                 name: 'IMAGE_TAG',
                 defaultValue: '',
-                description: '镜像 tag（留空=自动从代码 commit 计算）'
+                description: '镜像 tag（留空=自动计算；手工值必须为 R<40位Git SHA>）'
             )
             string(
                 name: 'ROLLBACK_REVISION',
                 defaultValue: '0',
-                description: 'helm 回滚版本号（0=上一个版本）'
+                description: 'Deployment revision（0=上一个版本）'
+
+        // ── Gitea Webhook 自动触发（Generic Webhook Trigger Plugin）──
+        // token = Job 短名（如 ad-gateway-test），Gitea 侧用批量脚本配置
+        // 生产 Job 永远不自动触发；手动 Build with Parameters 不受影响
+        triggers {
+            GenericTrigger(
+                genericVariables: [
+                    [key: 'GITEA_REF',    value: '$.ref'],
+                    [key: 'GITEA_AFTER',  value: '$.after'],
+                    [key: 'GITEA_PUSHER', value: '$.pusher.login'],
+                    [key: 'GITEA_REPO',   value: '$.repository.full_name'],
+                ],
+                token: env.JOB_NAME?.tokenize('/')?.last() ?: '',
+                regexpFilterText: '$GITEA_REF',
+                regexpFilterExpression: resolveWebhookBranchFilter(cfg),
+                causeString: 'Gitea push by $GITEA_PUSHER to $GITEA_REF',
+                printContributedVariables: true,
+                printPostContent: false,
+                silentResponse: false,
+            )
+        }
+
             )
             booleanParam(
                 name: 'SKIP_HEALTH_CHECK',
@@ -111,14 +141,18 @@ def call(Map config) {
             stage('权限检查') {
                 steps {
                     script {
+                        validatePipelineConfig(cfg)
+                        validateJobEnvironment(params.DEPLOY_ENV)
+                        validateRequestedBranch(params.GIT_BRANCH)
                         checkPermission(params.DEPLOY_ENV)
+                        validateProductionRequest(cfg, params.DEPLOY_ENV, params.ACTION, params.GIT_BRANCH)
                     }
                 }
             }
 
             // ────────────────────────────────────────────────────────────────
             // 「定位运行时资产」: rollback / restart / deploy 都需要
-            //   作用：拉运维仓库的 baselines/charts/_overrides.yaml 到 agent
+            //   作用：定位运维仓库的 baselines、Kustomize 模板和项目覆盖配置
             //   resolveNamespace 需要它，所以即使 rollback/restart 也得跑
             //   restart/rollback 用最少的代价跑这个 stage
             // ────────────────────────────────────────────────────────────────
@@ -133,7 +167,7 @@ def call(Map config) {
 
             // ────────────────────────────────────────────────────────────────
             // 「解析镜像目标 + 计算 tag」: 仅 ACTION=deploy 才需要
-            //   restart 不构建/不切镜像，rollback 用 helm rollback 走 release 历史
+            //   restart 不构建/不切镜像，rollback 使用 Deployment revision
             //   两者都不需要 git checkout / docker tag / IMAGE_PROJECT
             // ────────────────────────────────────────────────────────────────
             stage('解析镜像目标 + 计算 tag') {
@@ -147,21 +181,27 @@ def call(Map config) {
                         // 只在 2 种特殊场景才需要再 checkout：
                         //   场景 A：用户传了 GIT_BRANCH 参数，且非首次构建（要切到指定分支/tag）
                         //   场景 B：用户显式传了 gitUrl/gitCredId（monorepo 跨仓库部署）
-                        def needRecheckout = false
                         def explicitRepo = (cfg.gitUrl?.trim() && cfg.gitCredId?.trim())
-                        def explicitBranch = (params.GIT_BRANCH?.trim() && params.GIT_BRANCH != env.BRANCH_NAME && params.GIT_BRANCH != 'main' && params.GIT_BRANCH != 'master')
+                        def requestedBranch = params.GIT_BRANCH?.trim()?.replaceFirst(/^refs\/heads\//, '')?.replaceFirst(/^origin\//, '')
+                        def currentBranch = (env.BRANCH_NAME ?: '').replaceFirst(/^origin\//, '')
+                        def explicitBranch = (requestedBranch && requestedBranch != currentBranch)
 
                         if (explicitRepo) {
                             echo "📥 Checkout 显式仓库: ${cfg.gitUrl} (branch=${params.GIT_BRANCH})"
-                            checkout([
-                                $class: 'GitSCM',
-                                branches: [[name: "${params.GIT_BRANCH}"]],
-                                userRemoteConfigs: [[
-                                    credentialsId: cfg.gitCredId,
-                                    url: cfg.gitUrl
-                                ]]
-                            ])
+                            env.BUSINESS_WORKSPACE = "${env.WORKSPACE}/.business-source"
+                            dir(env.BUSINESS_WORKSPACE) {
+                                deleteDir()
+                                checkout([
+                                    $class: 'GitSCM',
+                                    branches: [[name: "*/${requestedBranch}"]],
+                                    userRemoteConfigs: [[
+                                        credentialsId: cfg.gitCredId,
+                                        url: cfg.gitUrl
+                                    ]]
+                                ])
+                            }
                         } else if (explicitBranch) {
+                            env.BUSINESS_WORKSPACE = env.WORKSPACE
                             echo "📥 切换到用户指定分支/tag: ${params.GIT_BRANCH}"
                             checkout([
                                 $class: 'GitSCM',
@@ -170,37 +210,60 @@ def call(Map config) {
                                 extensions: scm.extensions ?: []
                             ])
                         } else {
+                            env.BUSINESS_WORKSPACE = env.WORKSPACE
                             echo "📥 复用 Jenkins SCM 已 checkout 的 workspace（分支: ${env.BRANCH_NAME ?: 'auto'}）"
                         }
 
-                        // 自动获取 git 信息回填到 cfg
-                        cfg.gitUrl = cfg.gitUrl ?: sh(
-                            script: 'git config --get remote.origin.url',
-                            returnStdout: true
-                        ).trim()
-                        def actualBranch = sh(
-                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "(detached)"',
-                            returnStdout: true
-                        ).trim()
-                        echo "📥 当前仓库: ${cfg.gitUrl}"
-                        echo "📥 当前分支: ${actualBranch}"
+                        dir(env.BUSINESS_WORKSPACE) {
+                            // 自动获取 git 信息回填到 cfg
+                            cfg.gitUrl = cfg.gitUrl ?: sh(
+                                script: 'git config --get remote.origin.url',
+                                returnStdout: true
+                            ).trim()
+                            def actualBranch = sh(
+                                script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "(detached)"',
+                                returnStdout: true
+                            ).trim()
+                            echo "📥 当前仓库: ${cfg.gitUrl}"
+                            echo "📥 当前分支: ${actualBranch}"
 
-                        env.GIT_COMMIT_SHORT = sh(
-                            script: 'git rev-parse --short=9 HEAD',
-                            returnStdout: true
-                        ).trim()
+                            if (params.DEPLOY_ENV == 'prod') {
+                                verifyProductionCommit()
+                            }
+
+                            env.GIT_COMMIT_ID = sh(
+                                script: 'git rev-parse HEAD',
+                                returnStdout: true
+                            ).trim()
+                        }
 
                         // 镜像 tag
                         if (params.IMAGE_TAG?.trim()) {
                             env.DOCKER_TAG = params.IMAGE_TAG.trim()
                             echo "📌 手动指定的镜像 tag: ${env.DOCKER_TAG}"
                         } else {
-                            env.DOCKER_TAG = "R${env.GIT_COMMIT_SHORT}"
+                            env.DOCKER_TAG = "R${env.GIT_COMMIT_ID}"
                             echo "📌 自动计算镜像 tag: ${env.DOCKER_TAG}"
                         }
+                        if (!(env.DOCKER_TAG ==~ /^R[0-9a-f]{40}$/)) {
+                            error '镜像 tag 必须为 R<40位小写Git SHA>'
+                        }
+                        if (params.DEPLOY_ENV == 'prod') {
+                            def requestedImageCommit = env.DOCKER_TAG.substring(1)
+                            if (requestedImageCommit != env.GIT_COMMIT_ID) {
+                                error "生产镜像必须对应 ${env.PROD_BRANCH} 当前 HEAD ${env.GIT_COMMIT_ID}；请先将已测试 commit 合并为该分支 HEAD，再发布"
+                            }
+                            echo "✅ 生产镜像 commit 与 ${env.PROD_BRANCH} HEAD 一致: ${requestedImageCommit}"
+                        }
 
-                        // 解析 IMAGE_PROJECT（多 SWR project 隔离）
+                        // 解析 IMAGE_PROJECT（默认所有环境使用同一 organization）
                         def projectMap = readImageProjectsMap()
+                        projectMap.each { projectEnv, project ->
+                            if (!(projectEnv ==~ /^[a-z0-9-]+$/) ||
+                                !(project ==~ /^[a-z0-9][a-z0-9._-]*$/)) {
+                                error "baselines 中的镜像 organization 非法: ${projectEnv}=${project}"
+                            }
+                        }
 
                         // 当前环境的 project（部署目标）
                         env.IMAGE_PROJECT = projectMap[params.DEPLOY_ENV]
@@ -208,16 +271,14 @@ def call(Map config) {
                             error "❌ baselines/_global.yaml 中未配置 image.projects.${params.DEPLOY_ENV}"
                         }
 
-                        // 镜像构建/源头 project
-                        // 优先级：dev project > test project > 当前环境
-                        // 这保证：有 dev 时镜像构建在 dev project，没 dev 时 test 也用同一个 project（实际是 sinozo-test）
-                        env.IMAGE_PROJECT_BUILD = projectMap['dev'] ?: projectMap['test'] ?: env.IMAGE_PROJECT
+                        // 两环境模型：test 构建，prod 复用同一 organization/tag。
+                        env.IMAGE_PROJECT_BUILD = projectMap['test'] ?: env.IMAGE_PROJECT
 
                         echo "📌 IMAGE_PROJECT (${params.DEPLOY_ENV}): ${env.IMAGE_PROJECT}"
                         echo "📌 IMAGE_PROJECT_BUILD (镜像源): ${env.IMAGE_PROJECT_BUILD}"
 
                         if (env.IMAGE_PROJECT != env.IMAGE_PROJECT_BUILD) {
-                            echo "📌 跨 project 部署：镜像将从 ${env.IMAGE_PROJECT_BUILD} promotion 到 ${env.IMAGE_PROJECT}"
+                            echo "📌 跨 organization 部署：镜像将从 ${env.IMAGE_PROJECT_BUILD} promotion 到 ${env.IMAGE_PROJECT}"
                         }
                     }
                 }
@@ -250,12 +311,14 @@ def call(Map config) {
                         // pushImage 会用 env.IMAGE_PROJECT_BUILD 作为推送目标
                         // （由 pushImage.groovy 内部读取 env.IMAGE_PROJECT，但构建阶段我们覆盖一下）
                         env.IMAGE_PROJECT_PUSH_TARGET = env.IMAGE_PROJECT_BUILD
-                        if (cfg.subdirectory) {
-                            dir(cfg.subdirectory) {
+                        dir(env.BUSINESS_WORKSPACE ?: env.WORKSPACE) {
+                            if (cfg.subdirectory) {
+                                dir(cfg.subdirectory) {
+                                    buildAndPush(cfg)
+                                }
+                            } else {
                                 buildAndPush(cfg)
                             }
-                        } else {
-                            buildAndPush(cfg)
                         }
                     }
                 }
@@ -287,16 +350,39 @@ def call(Map config) {
                 }
             }
 
-            // 「生产部署审批」stage 当前未启用（公司还没接入审批流）
-            // 如需启用：
-            //   1. 在此处加回 stage 块（参考下面 prodApproval 函数实现）
-            //   2. 配置 Jenkins 全局变量 PROD_APPROVERS、PROD_APPROVAL_TIMEOUT
-            // 函数 prodApproval() 仍保留在文件末尾，方便后续直接接入
+            stage('生产变更预览') {
+                when {
+                    allOf {
+                        expression { params.DEPLOY_ENV == 'prod' }
+                        expression { params.ACTION == 'deploy' }
+                    }
+                }
+                steps {
+                    script {
+                        def kubeCred = resolveKubeconfigCred(cfg, params.DEPLOY_ENV)
+                        withCredentials([file(credentialsId: kubeCred, variable: 'KUBECONFIG')]) {
+                            // 渲染、校验并执行 kubectl diff，不修改集群。审批人先看差异再批准。
+                            deployToK8s(cfg, params.DEPLOY_ENV, params, false)
+                        }
+                    }
+                }
+            }
+
+            stage('生产操作审批') {
+                when {
+                    expression { params.DEPLOY_ENV == 'prod' }
+                }
+                steps {
+                    script {
+                        prodApproval(cfg)
+                    }
+                }
+            }
 
             // ────────────────────────────────────────────────────────────────
             // 「部署到 K8s」: 三种 ACTION 走不同分支
-            //   - deploy:   helm upgrade --install + Docker pull secret + Nacos 凭据
-            //   - rollback: helm rollback (只需 kubeconfig)
+            //   - deploy:   kubectl kustomize/apply + Docker pull secret + Nacos 凭据
+            //   - rollback: kubectl rollout undo (只需 kubeconfig)
             //   - restart:  kubectl rollout restart (只需 kubeconfig)
             // ────────────────────────────────────────────────────────────────
             stage('部署到 K8s') {
@@ -307,29 +393,17 @@ def call(Map config) {
 
                         withCredentials([file(credentialsId: kubeCred, variable: 'KUBECONFIG')]) {
                             if (params.ACTION == 'deploy') {
-                                // deploy 完整链路：Docker pull secret + 可选 Nacos 凭据
-                                withCredentials([usernamePassword(
-                                    credentialsId: cfg.dockerCredId,
-                                    usernameVariable: 'DOCKER_USER',
-                                    passwordVariable: 'DOCKER_PASS'
-                                )]) {
-                                    def authStr = "${env.DOCKER_USER}:${env.DOCKER_PASS}".bytes.encodeBase64().toString()
-                                    def dockerJson = """{"auths":{"${cfg.dockerRegistry}":{"username":"${env.DOCKER_USER}","password":"${env.DOCKER_PASS}","auth":"${authStr}"}}}"""
-                                    env.PULL_SECRET_DATA = dockerJson.bytes.encodeBase64().toString()
-
-                                    if (cfg.nacosCredId) {
-                                        withCredentials([usernamePassword(
-                                            credentialsId: cfg.nacosCredId,
-                                            usernameVariable: 'NACOS_USER',
-                                            passwordVariable: 'NACOS_PASS'
-                                        )]) {
-                                            env.NACOS_USERNAME = env.NACOS_USER
-                                            env.NACOS_PASSWORD = env.NACOS_PASS
-                                            deployToK8s(cfg, params.DEPLOY_ENV, params)
-                                        }
-                                    } else {
-                                        deployToK8s(cfg, params.DEPLOY_ENV, params)
+                                // 默认 regcred 由平台预置，部署阶段不额外读取 registry 凭据。
+                                if (cfg.manageRegistrySecret) {
+                                    withCredentials([usernamePassword(
+                                        credentialsId: cfg.dockerCredId,
+                                        usernameVariable: 'DOCKER_USER',
+                                        passwordVariable: 'DOCKER_PASS'
+                                    )]) {
+                                        deployWithRuntimeCredentials(cfg, params.DEPLOY_ENV, params)
                                     }
+                                } else {
+                                    deployWithRuntimeCredentials(cfg, params.DEPLOY_ENV, params)
                                 }
                             } else {
                                 // restart / rollback：只需要 kubeconfig，不读 Docker / Nacos 凭据
@@ -357,22 +431,73 @@ def call(Map config) {
 // Helper functions
 // ════════════════════════════════════════════════════════════════════════
 
+def validatePipelineConfig(Map cfg) {
+    ['projectName', 'serviceName', 'dockerImage', 'dockerCredId'].each { key ->
+        if (!cfg[key]?.toString()?.trim()) {
+            error "k8sDeploy 缺少必填参数: ${key}"
+        }
+    }
+    if (!['java', 'nodejs'].contains(cfg.serviceType)) {
+        error "serviceType 只支持 java 或 nodejs，当前值: ${cfg.serviceType}"
+    }
+    if (!['sealed', 'jenkins'].contains(cfg.nacosSecretMode)) {
+        error "nacosSecretMode 只支持 sealed 或 jenkins，当前值: ${cfg.nacosSecretMode}"
+    }
+    if (cfg.nacosSecretMode == 'jenkins' && cfg.serviceType == 'java' && !cfg.nacosCredId?.trim()) {
+        error 'nacosSecretMode=jenkins 时必须配置 nacosCredId'
+    }
+    def dnsName = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
+    if (!(cfg.projectName ==~ dnsName) || !(cfg.serviceName ==~ dnsName)) {
+        error 'projectName 和 serviceName 必须是小写 Kubernetes DNS 名称'
+    }
+    if (!(cfg.dockerRegistry ==~ /^[A-Za-z0-9.:-]+$/) ||
+        !(cfg.dockerImage ==~ /^[a-z0-9][a-z0-9._\/-]*$/)) {
+        error 'dockerRegistry 或 dockerImage 格式非法'
+    }
+    if (cfg.subdirectory &&
+        (!(cfg.subdirectory ==~ /^[A-Za-z0-9._\/-]+$/) || cfg.subdirectory.contains('..') || cfg.subdirectory.startsWith('/'))) {
+        error 'subdirectory 必须是业务仓库内的相对路径'
+    }
+    if (!(cfg.dockerContext ==~ /^[A-Za-z0-9._\/-]+$/) ||
+        cfg.dockerContext.contains('..') || cfg.dockerContext.startsWith('/')) {
+        error 'dockerContext 必须是业务仓库内的相对路径'
+    }
+    def hasGitUrl = cfg.gitUrl?.trim() as boolean
+    def hasGitCred = cfg.gitCredId?.trim() as boolean
+    if (hasGitUrl != hasGitCred) {
+        error 'gitUrl 和 gitCredId 必须同时配置或同时留空'
+    }
+}
+
+def deployWithRuntimeCredentials(Map cfg, String deployEnv, def runtimeParams) {
+    if (cfg.serviceType == 'java' && cfg.nacosSecretMode == 'jenkins') {
+        withCredentials([usernamePassword(
+            credentialsId: cfg.nacosCredId,
+            usernameVariable: 'NACOS_USERNAME',
+            passwordVariable: 'NACOS_PASSWORD'
+        )]) {
+            deployToK8s(cfg, deployEnv, runtimeParams)
+        }
+    } else {
+        deployToK8s(cfg, deployEnv, runtimeParams)
+    }
+}
+
 /**
- * 从 Job 名末段自动推断默认 DEPLOY_ENV，并把它放在 choices 第一位
+ * 从 Job 名末段绑定 DEPLOY_ENV。
  *
  * 规则：
- *   - Job 名以 -dev / -test / -prod / -staging / -uat / -pre 结尾 → 用对应环境作默认
- *   - 不匹配 → 用 'test' 作默认（多数情况）
+ *   - Job 名以 -test / -prod 结尾 → 只允许对应环境
+ *   - 不匹配 → 只提供 test；生产必须使用独立的 *-prod Job
  *
  * 例：
- *   ad-gateway-dev   → ['dev', 'test', 'prod', ...]
- *   ad-gateway-test  → ['test', 'dev', 'prod', ...]
- *   ad-gateway-prod  → ['prod', 'test', 'dev', ...]
- *   ad-gateway       → ['test', 'dev', 'prod', ...]   （无后缀，默认 test）
+ *   ad-gateway-test  → ['test']
+ *   ad-gateway-prod  → ['prod']
+ *   ad-gateway       → ['test']
  */
 @NonCPS
 def inferEnvChoices() {
-    def allEnvs = ['dev', 'test', 'prod']    // 候选环境，可按需扩展
+    def allEnvs = ['test', 'prod']
     def jobName = (env?.JOB_NAME ?: '').toLowerCase()
 
     // 取 Job 名最后一段（去掉 folder 路径前缀）
@@ -381,14 +506,33 @@ def inferEnvChoices() {
     // 提取末段（最后一个 - 之后）
     def suffix = shortName.tokenize('-').last()
 
-    // 如果末段命中已知环境，把它移到第一位
+    // 环境专用 Job 不能切换到其他环境，避免 test Job 请求生产凭据。
     if (allEnvs.contains(suffix)) {
-        def reordered = [suffix] + allEnvs.findAll { it != suffix }
-        return reordered
+        return [suffix]
     }
 
-    // 不匹配，用 test 作默认（最常见场景）
-    return ['test', 'dev', 'prod']
+    // 无环境后缀的兼容 Job 永远不能部署生产。
+    return ['test']
+}
+
+def validateJobEnvironment(String deployEnv) {
+    def allEnvs = ['test', 'prod']
+    def shortName = (env.JOB_NAME ?: '').tokenize('/').last()?.toLowerCase() ?: ''
+    def suffix = shortName.tokenize('-').last()
+    if (allEnvs.contains(suffix) && suffix != deployEnv) {
+        error "Job '${shortName}' 只允许部署 ${suffix}，不能选择 ${deployEnv}"
+    }
+    if (deployEnv == 'prod' && suffix != 'prod') {
+        error '生产部署必须由名称以 -prod 结尾的独立 Job 执行'
+    }
+}
+
+def validateRequestedBranch(String requestedRef) {
+    def branch = requestedRef?.trim()
+    if (!branch || !(branch ==~ /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/) ||
+        branch.contains('..') || branch.contains('//') || branch.endsWith('/') || branch.endsWith('.lock')) {
+        error "非法业务仓库分支: '${requestedRef ?: ''}'"
+    }
 }
 
 /**
@@ -415,7 +559,7 @@ def resolveAgentLabel(Map cfg) {
 }
 
 /**
- * 自动定位 Library 已 clone 的根目录（含 baselines/ charts/ automation/）
+ * 自动定位 Library 已 clone 的根目录（含 baselines/ kustomize/ automation/）
  *
  * Jenkins 加载 Shared Library 时，会把整个仓库 clone 到：
  *   ${WORKSPACE}@libs/<library-name>/                    (单 library 默认)
@@ -432,11 +576,18 @@ def resolveDeployBaseDir() {
         return env.K8S_DEPLOY_DIR.trim()
     }
 
-    // 优先级 2：${WORKSPACE}@libs/ 下查找（controller 节点 OK，agent 节点通常找不到）
+    // 优先级 2：复用当前 Job SCM 中的平台基线（旧服务兼容）。
+    // 业务仓库通常没有 baselines，因此会继续查找 Shared Library 资产。
+    if (fileExists("${env.WORKSPACE}/baselines/_global.yaml")) {
+        echo "📍 使用当前 Job SCM 中的运维配置"
+        return env.WORKSPACE
+    }
+
+    // 优先级 3：${WORKSPACE}@libs/ 下查找（controller 节点 OK，agent 节点通常找不到）
     def libsRoot = "${env.WORKSPACE}@libs"
     if (fileExists(libsRoot)) {
         def candidates = sh(
-            script: """find ${libsRoot} -maxdepth 3 -type f -name '_global.yaml' -path '*/baselines/_global.yaml' 2>/dev/null | head -5""",
+            script: """find '${libsRoot}' -maxdepth 3 -type f -name '_global.yaml' -path '*/baselines/_global.yaml' 2>/dev/null | head -5""",
             returnStdout: true
         ).trim().split('\n').findAll { it }
 
@@ -447,55 +598,50 @@ def resolveDeployBaseDir() {
         }
     }
 
-    // 优先级 3：传统路径（运维手动 clone 的兼容路径）
+    // 优先级 4：传统路径（运维手动 clone 的兼容路径）
     def legacyPath = "/var/lib/jenkins/workspace/deploy/k8s-deploy"
     if (fileExists("${legacyPath}/baselines/_global.yaml")) {
         echo "📍 使用兼容路径: ${legacyPath}"
         return legacyPath
     }
 
-    // 优先级 4：在 agent 上自动 clone（agent 节点上 Library 不会自动同步过来）
-    // 用 Jenkins 全局变量 K8S_DEPLOY_LIB_URL + K8S_DEPLOY_LIB_CRED 或默认值
-    def libUrl = env.K8S_DEPLOY_LIB_URL?.trim() ?: 'https://github.com/ChenJustin666/sinozo-shared-library.git'
-    def libCred = env.K8S_DEPLOY_LIB_CRED?.trim() ?: 'github-token-justin'
+    // 优先级 5：在 agent 上使用 Jenkins GitSCM 受管 checkout。
+    // 不把凭据拼进 URL，避免敏感信息留在 .git/config。
+    def libUrl = env.K8S_DEPLOY_LIB_URL?.trim()
+    def libCred = env.K8S_DEPLOY_LIB_CRED?.trim()
     def libBranch = env.K8S_DEPLOY_LIB_BRANCH?.trim() ?: 'main'
     def runtimeDir = "${env.WORKSPACE}/.k8s-deploy-runtime"
 
+    if (!libUrl || !libCred) {
+        error '无法访问 Shared Library 运行时资产；请由 Jenkins 管理员配置 K8S_DEPLOY_LIB_URL 和 K8S_DEPLOY_LIB_CRED'
+    }
+    if (!(libBranch ==~ /^[A-Za-z0-9._\/-]+$/) || libBranch.contains('..') || libBranch.startsWith('/')) {
+        error 'K8S_DEPLOY_LIB_BRANCH 格式非法'
+    }
+
     echo "📥 agent 节点上未找到运行时资产，自动 clone..."
     echo "    URL:    ${libUrl}"
-    echo "    Cred:   ${libCred}"
     echo "    Branch: ${libBranch}"
     echo "    To:     ${runtimeDir}"
 
-    // 如果已经 clone 过，做 git pull 拉最新
-    if (fileExists("${runtimeDir}/.git")) {
-        withCredentials([usernamePassword(credentialsId: libCred,
-                                           usernameVariable: 'GIT_USER',
-                                           passwordVariable: 'GIT_PASS')]) {
-            sh """
-                cd ${runtimeDir}
-                git config credential.helper '!f() { echo username=\$GIT_USER; echo password=\$GIT_PASS; }; f'
-                # 注意：git fetch --depth 1 origin <branch> 只更新 FETCH_HEAD，不会更新 origin/<branch>
-                # 必须显式 +refspec 强制更新远程跟踪分支，避免 reset 用到旧引用
-                git fetch --depth 1 --force origin +refs/heads/${libBranch}:refs/remotes/origin/${libBranch} 2>&1 || true
-                git reset --hard FETCH_HEAD 2>&1 || true
-                git clean -fd 2>&1 || true
-                git config --unset credential.helper 2>/dev/null || true
-
-            """
-        }
-    } else {
-        // 首次 clone
-        withCredentials([usernamePassword(credentialsId: libCred,
-                                           usernameVariable: 'GIT_USER',
-                                           passwordVariable: 'GIT_PASS')]) {
-            sh """
-                rm -rf ${runtimeDir}
-                # 从 https URL 中提取 host/path 拼接带凭据的 URL
-                AUTH_URL=\$(echo '${libUrl}' | sed 's|https://|https://'\$GIT_USER':'\$GIT_PASS'@|')
-                git clone --depth 1 -b ${libBranch} "\$AUTH_URL" ${runtimeDir}
-            """
-        }
+    dir(runtimeDir) {
+        deleteDir()
+        checkout([
+            $class: 'GitSCM',
+            branches: [[name: "*/${libBranch}"]],
+            doGenerateSubmoduleConfigurations: false,
+            extensions: [[
+                $class: 'CloneOption',
+                depth: 1,
+                noTags: true,
+                shallow: true,
+                timeout: 10
+            ]],
+            userRemoteConfigs: [[
+                credentialsId: libCred,
+                url: libUrl
+            ]]
+        ])
     }
 
     if (!fileExists("${runtimeDir}/baselines/_global.yaml")) {
@@ -530,9 +676,9 @@ def resolveDeployBaseDir() {
  * 期望的 YAML 片段：
  *   image:
  *     projects:
- *       dev:  sinozo-test
- *       test: sinozo-test
- *       prod: sinozo-prod
+ *       dev:  sinozo
+ *       test: sinozo
+ *       prod: sinozo
  */
 def readImageProjectsMap() {
     def baseDir = env.DEPLOY_BASE_DIR
@@ -571,9 +717,9 @@ ${candidates.collect { '  - ' + it.path }.join('\n')}
 期望的格式：
   image:
     projects:
-      dev:  sinozo-test
-      test: sinozo-test
-      prod: sinozo-prod
+      dev:  sinozo
+      test: sinozo
+      prod: sinozo
 """
 }
 
@@ -646,17 +792,9 @@ def needBuildImage(Map cfg) {
 
     echo "🔍 检查镜像是否已存在: ${fullImage}"
 
-    def rc = -1
-    withCredentials([usernamePassword(
-        credentialsId: cfg.dockerCredId,
-        usernameVariable: 'DOCKER_USER',
-        passwordVariable: 'DOCKER_PASS'
-    )]) {
-        rc = sh(
-            script: """
-                docker login ${cfg.dockerRegistry} -u \$DOCKER_USER -p \$DOCKER_PASS >/dev/null 2>&1
-                docker manifest inspect ${fullImage} >/dev/null 2>&1
-            """,
+    def rc = withDockerRegistry(cfg) {
+        sh(
+            script: "docker manifest inspect '${fullImage}' >/dev/null 2>&1",
             returnStatus: true
         )
     }
@@ -673,7 +811,7 @@ def needBuildImage(Map cfg) {
 /**
  * 构建并推送镜像
  *
- * 推送目标：env.IMAGE_PROJECT_BUILD（如 sinozo-test）
+ * 推送目标：env.IMAGE_PROJECT_BUILD（默认 sinozo）
  */
 def buildAndPush(Map cfg) {
     if (cfg.serviceType == 'java') {
@@ -700,16 +838,9 @@ def verifyImageExists(Map cfg, String project) {
 
     echo "🔍 验证镜像存在: ${fullImage}"
 
-    withCredentials([usernamePassword(
-        credentialsId: cfg.dockerCredId,
-        usernameVariable: 'DOCKER_USER',
-        passwordVariable: 'DOCKER_PASS'
-    )]) {
+    withDockerRegistry(cfg) {
         def rc = sh(
-            script: """
-                docker login ${cfg.dockerRegistry} -u \$DOCKER_USER -p \$DOCKER_PASS >/dev/null 2>&1
-                docker manifest inspect ${fullImage} >/dev/null 2>&1
-            """,
+            script: "docker manifest inspect '${fullImage}' >/dev/null 2>&1",
             returnStatus: true
         )
 
@@ -722,7 +853,7 @@ def verifyImageExists(Map cfg, String project) {
   3. 跨 project 但 promotion 阶段失败
 
 修复方法：
-  - 先去 ${cfg.serviceName}-test 或 ${cfg.serviceName}-dev Job 部署一次（构建镜像）
+  - 先去 ${cfg.serviceName}-test Job 部署一次（构建镜像）
   - 或手动指定一个已存在的镜像 tag（参数 IMAGE_TAG）
 """
         }
@@ -733,9 +864,9 @@ def verifyImageExists(Map cfg, String project) {
 /**
  * 解析 kubeconfig 凭据 ID
  *
- * 业务 Jenkinsfile 支持 2 种写法：
+ * 推荐由 Jenkins 管理员配置 K8S_CRED_<ENV>。
  *
- * ① Map 形式（推荐，按环境分别指定）⭐
+ * 旧业务 Jenkinsfile 的 Map/字符串写法只兼容非生产环境：
  *   k8sDeploy(
  *       kubeconfigCredId: [
  *           test: 'test-k8s-aliyun-am',
@@ -743,22 +874,36 @@ def verifyImageExists(Map cfg, String project) {
  *       ],
  *   )
  *
- * ② 字符串形式（所有环境用同一个）
+ * 字符串形式：
  *   k8sDeploy(kubeconfigCredId: 'k8s-bigdata')
  *
- * ③ 不传（按 Jenkins 全局变量 K8S_CRED_<ENV> 自动查找）
+ * 不传（推荐）：
  *   k8sDeploy(...)
  *
- * 解析顺序：
- *   1. cfg.kubeconfigCredId 是 Map → 取 [deployEnv]
- *   2. cfg.kubeconfigCredId 是非空字符串 → 直接返回
- *   3. Jenkins 全局变量 K8S_CRED_<ENV>
- *   4. 旧约定 k8s-{project}-{env}（向后兼容）
+ * 解析规则：prod 只读 K8S_CRED_PROD；非生产优先 K8S_CRED_<ENV>，再兼容旧写法。
  */
 def resolveKubeconfigCred(Map cfg, String deployEnv) {
     def credValue = cfg.kubeconfigCredId
 
-    // 优先级 1：Map 形式 - 按环境取
+    // 生产凭据只能由 Jenkins 管理员在全局环境中配置。业务 Jenkinsfile 无权覆盖。
+    if (deployEnv == 'prod') {
+        def prodCred = env.K8S_CRED_PROD?.trim()
+        if (!prodCred) {
+            error '未配置 Jenkins 全局环境变量 K8S_CRED_PROD，拒绝生产操作'
+        }
+        echo '    (来源: Jenkins 管理员配置 K8S_CRED_PROD；忽略业务 Jenkinsfile 的 prod 凭据)'
+        return prodCred
+    }
+
+    // 非生产也优先使用管理员定义的环境凭据。
+    def envKey = "K8S_CRED_${deployEnv.toUpperCase()}"
+    def globalCred = env."${envKey}"
+    if (globalCred?.trim()) {
+        echo "    (来源: Jenkins 全局环境变量 ${envKey})"
+        return globalCred.trim()
+    }
+
+    // 兼容旧业务 Jenkinsfile，仅允许覆盖非生产凭据。
     if (credValue instanceof Map) {
         def envSpecific = credValue[deployEnv]
         if (envSpecific?.toString()?.trim()) {
@@ -773,18 +918,66 @@ def resolveKubeconfigCred(Map cfg, String deployEnv) {
         return credValue.toString().trim()
     }
 
-    // 优先级 3：Jenkins 全局环境变量 K8S_CRED_<ENV>
-    def envKey = "K8S_CRED_${deployEnv.toUpperCase()}"
-    def globalCred = env."${envKey}"
-    if (globalCred?.trim()) {
-        echo "    (来源: Jenkins 全局环境变量 ${envKey})"
-        return globalCred.trim()
-    }
-
-    // 优先级 4：旧约定 k8s-{project}-{env}（向后兼容）
+    // 旧约定（仅非生产）
     def legacyId = "k8s-${cfg.projectName}-${deployEnv}"
     echo "    (来源: 默认约定 k8s-{project}-{env})"
     return legacyId
+}
+
+@NonCPS
+def resolveDefaultGitBranch(String configuredDefault) {
+    def shortJob = (env?.JOB_NAME ?: '').tokenize('/').last()?.toLowerCase() ?: ''
+    if (shortJob.endsWith('-prod')) return env?.PROD_BRANCH ?: 'master'
+    if (shortJob.endsWith('-test')) return 'test'
+    return configuredDefault ?: 'main'
+}
+
+/**
+ * 生产发布只允许来自管理员配置的分支。rollback/restart 不依赖源码分支。
+ */
+def validateProductionRequest(Map cfg, String deployEnv, String action, String requestedRef) {
+    if (deployEnv != 'prod') return
+    // A single business Jenkinsfile is supported. Explicit gitUrl/gitCredId
+    // remains available for the legacy ops-wrapper/monorepo model.
+    if (action != 'deploy') return
+    def prodBranch = env.PROD_BRANCH?.trim()
+    if (!prodBranch) {
+        error '未配置 Jenkins 全局环境变量 PROD_BRANCH，拒绝生产部署'
+    }
+    if (!(prodBranch ==~ /^[A-Za-z0-9._\/-]+$/) || prodBranch.contains('..') || prodBranch.startsWith('/')) {
+        error 'Jenkins 全局变量 PROD_BRANCH 格式非法'
+    }
+    def normalized = (requestedRef ?: '').replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')
+    if (normalized != prodBranch) {
+        error "生产部署只允许分支 '${prodBranch}'，当前选择: '${requestedRef}'"
+    }
+}
+
+/**
+ * 防止参数显示 master、实际 workspace 却是其他 commit。
+ */
+def verifyProductionCommit() {
+    def prodBranch = env.PROD_BRANCH?.trim()
+    def headCommit = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+    def prodCommit = sh(
+        script: "git rev-parse refs/remotes/origin/${prodBranch} 2>/dev/null || git rev-parse refs/heads/${prodBranch}",
+        returnStdout: true
+    ).trim()
+    if (headCommit != prodCommit) {
+        error "生产 workspace 不是 origin/${prodBranch} 最新 commit，拒绝部署"
+    }
+    if (params.IMAGE_TAG?.trim()) {
+        def match = params.IMAGE_TAG.trim() =~ /^R([0-9a-f]{40})$/
+        if (!match.matches()) {
+            error '生产手工 IMAGE_TAG 必须是 R<40位Git SHA>'
+        }
+        def imageCommit = match[0][1]
+        def inHistory = sh(script: "git merge-base --is-ancestor ${imageCommit} HEAD", returnStatus: true) == 0
+        if (!inHistory) {
+            error "指定镜像 commit ${imageCommit} 不属于 ${prodBranch} 历史，拒绝部署"
+        }
+    }
+    echo "✅ 生产源码校验通过: ${prodBranch}@${headCommit.take(9)}"
 }
 
 /**
@@ -792,23 +985,35 @@ def resolveKubeconfigCred(Map cfg, String deployEnv) {
  */
 def prodApproval(Map cfg) {
     def approvalTimeout = env.PROD_APPROVAL_TIMEOUT ?: '60'
-    def approvers = env.PROD_APPROVERS ?: 'admin,ops'
+    def approvers = env.PROD_APPROVERS?.trim()
+    if (!approvers) {
+        error '未配置 Jenkins 全局环境变量 PROD_APPROVERS，生产部署默认拒绝'
+    }
+    if (!(approvalTimeout ==~ /^\d+$/) || approvalTimeout.toInteger() < 1 || approvalTimeout.toInteger() > 1440) {
+        error 'PROD_APPROVAL_TIMEOUT 必须是 1-1440 分钟的整数'
+    }
+    def target = "deployment/${cfg.serviceName}"
+    if (params.ACTION == 'deploy') {
+        target = "${cfg.dockerRegistry}/${env.IMAGE_PROJECT}/${cfg.dockerImage}:${env.DOCKER_TAG}"
+    } else if (params.ACTION == 'rollback') {
+        target += " revision=${params.ROLLBACK_REVISION}"
+    }
 
     echo """
 ╔═══════════════════════════════════════════════════════════════╗
-║  ⚠️  生产部署审批                                              ║
+║  ⚠️  生产操作审批                                              ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  Service:  ${cfg.serviceName}
-║  Branch:   ${params.GIT_BRANCH}
-║  Image:    ${cfg.dockerRegistry}/${env.IMAGE_PROJECT}/${cfg.dockerImage}:${env.DOCKER_TAG}
+║  Action:   ${params.ACTION}
+║  Target:   ${target}
 ║  Approvers: ${approvers}
 ╚═══════════════════════════════════════════════════════════════╝
 """
 
     timeout(time: Integer.parseInt(approvalTimeout), unit: 'MINUTES') {
         input(
-            message: "确认部署 ${cfg.serviceName} 到生产环境？",
-            ok: "✅ 确认部署",
+            message: "确认在生产环境执行 ${params.ACTION}: ${cfg.serviceName}？",
+            ok: "✅ 确认执行",
             submitter: approvers,
             parameters: [
                 string(
@@ -819,5 +1024,37 @@ def prodApproval(Map cfg) {
             ]
         )
     }
-    echo "✅ 生产部署已批准"
+    echo "✅ 生产操作已批准"
 }
+
+/**
+ * Gitea Webhook 分支过滤规则
+ *
+ * 根据 Job 名称后缀自动决定哪些分支的 push 能触发构建：
+ *   *-prod  → '^$'（永不匹配，生产只能手动）
+ *   *-test  → '^refs/heads/(test|main)$'
+ *   *-dev   → '^refs/heads/(dev|develop)$'
+ *   无后缀  → '^refs/heads/(test|dev|main)$'
+ *
+ * 支持业务 Jenkinsfile 自定义：
+ *   k8sDeploy(webhookBranches: ['test', 'release/.*'])
+ */
+def resolveWebhookBranchFilter(Map cfg = [:]) {
+    def shortName = (env?.JOB_NAME ?: '').tokenize('/').last()?.toLowerCase() ?: ''
+    def suffix = shortName.tokenize('-').last()
+
+    // 生产 Job 永远不自动触发
+    if (suffix == 'prod') return '^$'
+
+    // 业务 Jenkinsfile 显式指定了触发分支
+    if (cfg.webhookBranches) {
+        def pattern = cfg.webhookBranches.collect { "refs/heads/${it}" }.join('|')
+        return "^(${pattern})\$"
+    }
+
+    // 默认规则
+    if (suffix == 'dev')  return '^refs/heads/(dev|develop)$'
+    if (suffix == 'test') return '^refs/heads/(test|main)$'
+    return '^refs/heads/(test|dev|main)$'
+}
+

@@ -1,6 +1,7 @@
 #!/bin/bash
 # ============================================================
 # values-validate.sh
+# Legacy Helm-only validator. Kustomize pipelines do not call this script.
 # ============================================================
 # 校验业务 values 文件是否含有【CI 注入字段】或【运维全局基线字段】
 #
@@ -52,7 +53,7 @@ FORBIDDEN_TOP_LEVEL=(
 
 # 嵌套字段
 FORBIDDEN_NESTED=(
-    "service.namespace"           # CI 注入: {project}-{env}
+    "service.namespace"           # 旧 Helm CI 注入字段
     "service.name"                # CI 注入: serviceName
     "image.name"                  # CI 注入: {project-prefix}/{service}
     "image.tag"                   # CI 注入: R{commit-sha}

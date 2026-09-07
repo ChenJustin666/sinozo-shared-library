@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ============================================================
+Maven Settings 示例 - 企业私服配置
+使用方式：
+  1. 复制此文件到业务仓库根目录，重命名为 settings.xml
+  2. 修改私服地址和认证信息
+  3. 与 Dockerfile.java*-multistage 配合使用
+
+注意：
+  - 此文件只在Docker构建阶段使用，不会进入运行镜像
+  - 生产环境复用镜像，只需配置测试私服即可
+  - 如果私服允许匿名访问，可删除 <servers> 节点
+============================================================ -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 
+          http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <!-- Maven私服镜像配置 -->
+  <mirrors>
+    <mirror>
+      <id>sinozo-nexus</id>
+      <!-- mirrorOf=* 表示拦截所有仓库请求 -->
+      <mirrorOf>*</mirrorOf>
+      <!-- 替换为你们的私服地址 -->
+      <url>http://nexus-test.sinozo.internal/repository/maven-public/</url>
+      <blocked>false</blocked>
+    </mirror>
+  </mirrors>
+
+  <!-- 私服认证配置（如果私服需要账号密码） -->
+  <servers>
+    <server>
+      <id>sinozo-nexus</id>
+      <!-- 替换为你们的私服账号 -->
+      <username>readonly</username>
+      <password>your-password-here</password>
+    </server>
+  </servers>
+
+  <!-- 可选：设置本地仓库路径（Docker内构建通常不需要修改） -->
+  <!-- <localRepository>/root/.m2/repository</localRepository> -->
+
+</settings>

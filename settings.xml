@@ -1,0 +1,95 @@
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">
+
+  <localRepository>/tmp/maven-repo</localRepository>
+
+  <servers>
+    <server>
+      <id>nexus-public</id>
+      <username>admin</username>
+      <password>sklzjSZhd2024!</password>
+    </server>
+    <server>
+      <id>nexus-snapshots</id>
+      <username>admin</username>
+      <password>sklzjSZhd2024!</password>
+    </server>
+    <server>
+      <id>nexus-releases</id>
+      <username>admin</username>
+      <password>sklzjSZhd2024!</password>
+    </server>
+  </servers>
+
+  <profiles>
+    <profile>
+      <id>nexus-releases</id>
+      <repositories>
+        <repository>
+          <id>nexus-releases</id>
+          <name>nexus-releases</name>
+          <url>http://43.155.21.196:8081/repository/maven_release/</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+    
+    <profile>
+      <id>nexus-snapshots</id>
+      <repositories>
+        <repository>
+          <id>nexus-snapshots</id>
+          <name>nexus-snapshots</name>
+          <url>http://43.155.21.196:8081/repository/maven_snapshot/</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+    
+    <profile>
+      <id>nexus-public</id>
+      <repositories>
+        <repository>
+          <id>nexus-public</id>
+          <name>nexus-public</name>
+          <url>http://43.155.21.196:8081/repository/maven-public/</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+          </snapshots>
+        </repository>
+        <repository>
+          <id>aliyun-public</id>
+          <name>aliyun-public</name>
+          <url>https://maven.aliyun.com/repository/public</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+
+  </profiles>
+
+  <activeProfiles>
+    <activeProfile>nexus-releases</activeProfile>
+    <activeProfile>nexus-snapshots</activeProfile>
+    <activeProfile>nexus-public</activeProfile>
+  </activeProfiles>
+</settings>

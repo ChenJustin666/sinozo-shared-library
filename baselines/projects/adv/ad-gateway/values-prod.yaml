@@ -1,9 +1,9 @@
 # ============================================================
-# 生产配置 - adv/ad-gateway   Owner: 运维
+# 旧 Helm 生产配置 - adv/ad-gateway   Owner: 运维
 # 路径: baselines/projects/adv/ad-gateway/values-prod.yaml
 #
-# ⚠️  CI 自动生成（基于业务 deploy/values-test.yaml）
-#     必须 review 以下字段后再放行 prod 部署：
+# ⚠️  仅供尚未迁移的 Helm release 使用；Kustomize Pipeline 不读取本文件。
+#     不再由 CI 自动生成。修改前必须 review：
 #       - service.replicas    (test=1, prod 建议 ≥ 2)
 #       - resources.limits    (按压测结果填，避免被 OOM)
 #       - resources.requests  (注意 namespace ResourceQuota)
@@ -21,8 +21,6 @@
 #   然后 Jenkins ad-gateway-prod 重新触发
 # ============================================================
 
-# 测试环境配置 (deploy/values-test.yaml)  Owner: 开发 
-# ============================================================
 # ⚠️ CI 自动注入字段（不要写）：
 #    image.name / image.tag / image.registry / namespace / service.name
 # ============================================================
@@ -57,14 +55,22 @@ java:
       -Djava.security.egd=file:/dev/./urandom
       -Dfile.encoding=UTF-8
       -DNACOS_SERVERS=nacos-clusterip.nacos.svc.cluster.local:8848
-      -DNACOS_NAMESPACE=adv_test
+      -DNACOS_NAMESPACE=adv_prod
       -DNACOS_GROUP=DEFAULT_GROUP
-      -DNACOS_USERNAME=admin
-      -DNACOS_PASSWORD=123456
-      -Dspring.profiles.active=test
+      -Dspring.profiles.active=prod
 
 # ── 业务环境变量（按需填，默认留空）──   ⚠️注意参数尽量通过env 变量外部化 
-env: []
+env:
+  - name: NACOS_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: nacos-auth-secret
+        key: NACOS_USERNAME
+  - name: NACOS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: nacos-auth-secret
+        key: NACOS_PASSWORD
 # 示例:
 # env:
 #   - name: LOG_LEVEL

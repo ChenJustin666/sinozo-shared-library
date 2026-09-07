@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# Java 17 多阶段构建 Dockerfile（推荐新项目使用）
+# 构建方式：Docker内完整构建，Jenkins只负责 docker build
+# Maven缓存：使用BuildKit cache mount持久化
+# 基础镜像：阿里云私有仓库（加速拉取）
+# 使用方式：复制到业务仓库根目录，重命名为 Dockerfile
+# 要求：1) pom.xml 配置 <finalName>app</finalName>
+#       2) 业务仓库根目录放置 settings.xml（Maven私服配置）
+#       3) Jenkins构建命令: DOCKER_BUILDKIT=1 docker build ...
+# ============================================================
+
+FROM sinozo-registry.ap-southeast-1.cr.aliyuncs.com/platform/maven:3.9-eclipse-temurin-17-alpine AS builder
+
+WORKDIR /app
+
+# 注入Maven私服配置（业务仓库需提供settings.xml）
+COPY settings.xml /root/.m2/settings.xml
+
+# 依赖下载阶段（利用Docker layer cache）
+COPY pom.xml .
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn dependency:go-offline -B
+
+# 编译阶段
+COPY src ./src
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn clean package -DskipTests -B && \
+    mv target/*.jar target/app.jar
+
+# ============================================================
+# 运行阶段（精简镜像，只包含JRE和jar）
+# ============================================================
+FROM sinozo-registry.ap-southeast-1.cr.aliyuncs.com/platform/eclipse-temurin:17-jre-alpine
+
+RUN apk add --no-cache curl tzdata && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone && \
+    apk del tzdata && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /app
+
+# 从构建阶段复制jar（settings.xml不会进入运行镜像）
+COPY --from=builder /app/target/app.jar app.jar
+RUN chown appuser:appgroup app.jar
+
+USER appuser
+
+ENV JAVA_OPTS="" \
+    TZ=Asia/Shanghai
+
+EXPOSE 8080
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

@@ -1,28 +1,23 @@
 # 容器化与 CI/CD 实战指南
 
+> **当前标准（2026-08）**：新服务使用 [Kustomize 部署方案](./Kustomize.md)；Helm 只供未迁移旧服务使用，同一服务不能同时由两个引擎管理。
+
 > 本文档面向所有开发运维人员，从零讲清楚**为什么我们要做这件事**，以及**整套流程如何跑通**。
 
 ---
 
 
-标准	你的实现	评价
-Build Once, Deploy Many	镜像只构建 1 次，prod 通过 Promotion 流转	业界最佳实践
-Image Promotion	docker pull + tag + push，layer 复用	与 Google gcrane copy 同理念
-权限隔离	prod 白名单 + prod values 在独立仓库	物理隔离，开发碰不到
-Values 分层覆盖	5 层合并链（chart default → global → business common → env → CI inject）	Helm 标准模式
-字段所有权	values-validate.sh 校验业务不写运维字段	防止职责混乱
-幂等部署	adoptExistingResource + helm upgrade --install	多次运行结果一致
-部署前预览	helm template 备份 + helm diff（新增）	变更前可见
-健康检查	helm --wait + kubectl rollout status	部署失败有感知
-回滚能力	ACTION=rollback + ROLLBACK_REVISION	可快速恢复
-可以补齐的（业界标准但当前缺）
-缺失项	业界标准	你的现状	优先级
-镜像安全扫描	Trivy/Snyk 扫描 CVE	无	中
-生产审批流	prod 部署前人工确认	代码已有但未启用	低（你说了还没接入）
-部署通知	企业微信/钉钉/Slack	只有 Jenkins console	低
-Git Tag 自动打	prod 成功后自动打 v1.0.0-R<commit>	无	低
---atomic 自动回滚	helm upgrade --atomic 失败自动 rollback	手动 rollback	低
-docker login 安全	--password-stdin	-p $DOCKER_PASS（命令行暴露）	中
+| 标准 | 当前实现 | 状态 |
+| --- | --- | --- |
+| Build Once, Deploy Many | 完整 Git SHA 镜像只构建一次，prod 复用同一 tag | 已实现 |
+| 配置分层 | Kustomize base + test/prod overlay | 已实现 |
+| 权限隔离 | 业务仓库唯一 Jenkinsfile；prod 分支/overlay、Job、Shared Library 和 kubeconfig 受保护 | 已实现 |
+| 密钥管理 | 默认 SealedSecret；已有中心密钥时 ExternalSecret | 已实现 |
+| 部署前预览 | 渲染和密钥校验后执行 `kubectl diff` | 已实现 |
+| 生产审批 | 白名单、固定分支、远端 commit 校验、人工审批 | 已实现 |
+| 健康检查和回滚 | `kubectl rollout status/undo/restart` | 已实现 |
+
+建议后续增加镜像 CVE 扫描、SBOM/签名验证、部署通知和 Kubernetes 准入策略。仓库与发布门禁见 [Git 与发布安全规范](./07-Git与发布安全规范.md)。
 
 
 ## 一、我们目前是怎么部署的
@@ -88,7 +83,7 @@ java -Xms512m -Xmx1024m -jar app.jar &
 | 对比项 | 传统 VM 部署 | K8s Pod 部署 |
 |--------|------------|-------------|
 | **部署速度** | 10-30 分钟（手动） | 1-2 分钟（自动） |
-| **回滚** | 找历史 jar，手动替换 | 一条命令 `helm rollback` |
+| **回滚** | 找历史 jar，手动替换 | `kubectl rollout undo` 或回退 Git 后重新部署 |
 | **扩容** | 买 ECS → 装环境 → 部署（半天） | 改 replicas: 3，自动扩容（30秒） |
 | **故障自愈** | 自己写脚本监控进程 | K8s 自动重启挂掉的 Pod（liveness probe） |
 | **资源利用** | 一台 ECS 跑一个服务（浪费） | 一台 ECS 跑多个 Pod（利用率 60-80%） |
@@ -147,7 +142,7 @@ nacos:
 ```
 
 **问题**：
-- 每次部署新环境（dev/test/prod）都要改 yml，改完还要重新打 jar
+- test/prod 使用同一镜像；test 分支构建并验证，合并到 `PROD_BRANCH` 后生产只复用对应 commit 镜像，不重新打包
 - 密码明文提交到 Git，任何能 clone 仓库的人都能看到
 - 想改配置？重新打 jar → 重新部署 → 服务重启
 
@@ -185,9 +180,9 @@ git log -p application.yml
 
 | 配置类型 | 存储位置 | 说明 |
 |---------|---------|------|
-| 非敏感（API 地址、开关） | values-test.yaml / Nacos | 可以进 Git |
-| 敏感（数据库密码、AK/SK） | K8s Secret | 运维手动创建，不进 Git |
-| Nacos 密码 | K8s Secret → env 注入 | 通过 secretKeyRef 引用 |
+| 非敏感（API 地址、开关） | Kustomize ConfigMap/patch 或 Nacos | 可以进 Git |
+| 敏感（数据库密码、AK/SK） | SealedSecret 密文或 ExternalSecret 引用 | Git 不存明文/普通 Secret |
+| Nacos 密码 | Secret → env 注入 | Secret 由 Sealed Secrets/External Secrets Controller 生成 |
 
 ---
 
@@ -198,17 +193,17 @@ git log -p application.yml
 ```
 业务仓库分支结构：
 ├── main          # 生产分支，保护分支，只能通过 MR/PR 合并
-├── develop       # 开发分支（可选，小团队可省略）
-├── feature/xxx   # 功能分支，开发完合并回 main
+├── test          # 测试集成分支，保护分支
+├── feature/xxx   # 功能分支，先合并到 test
 └── hotfix/xxx    # 紧急修复，从 main 拉出，修完合并回 main
 ```
 
 ### 6.2 日常开发流程
 
 ```bash
-# 1. 从 main 拉功能分支
-git checkout main
-git pull origin main
+# 1. 从 test 拉功能分支
+git checkout test
+git pull origin test
 git checkout -b feature/new-payment
 
 # 2. 开发 + 提交
@@ -216,20 +211,20 @@ git add .
 git commit -m "feat: 新增支付模块"
 git push origin feature/new-payment
 
-# 3. 提 MR/PR 合并到 main（代码 review）
+# 3. 提 MR/PR 合并到 test（代码 review）
 # → GitLab/GitHub 界面操作
 
-# 4. 合并后，Jenkins 自动部署到 test
-# → 触发 webhhok 或手动 Build
+# 4. test 验证后提 PR 到 main；main 的精确 commit 还需由 test Job 验证一次
+# → 生产只复用这个完整 commit SHA 对应的镜像
 ```
 
 ### 6.3 部署触发规则
 
 | 动作 | 触发方式 | 部署到 |
 |------|---------|--------|
-| push 到 main | Git Webhook 自动触发 | test 环境 |
-| 手动 Build | Jenkins 页面点击 | test 或 prod |
-| prod 部署 | 运维手动触发（白名单权限） | prod 环境 |
+| push/合并到测试分支 | Git Webhook 或手动触发 `*-test` Job | test 环境 |
+| 手动 Build | `*-test` Job | 测试环境 |
+| prod 部署 | 运维触发受保护的 `*-prod` Job | prod 环境 |
 
 ### 6.4 为什么不能直接 push 到 main？
 
@@ -247,17 +242,17 @@ git push origin feature/new-payment
 commit abc1234
     │
     ▼ test 部署时
-构建镜像：sinozo-test/ad-gateway:R1a2b3c4d
+构建镜像：sinozo/ad-gateway:R<40位Git SHA>
     │
-    ├── 部署到 test（helm upgrade）
+    ├── 部署到 test（kubectl apply）
     │
     ▼ prod 部署时（不重新构建）
-Image Promotion：docker pull → docker tag → docker push
+同一 sinozo organization 直接复用；仅跨 organization 时执行 Promotion
     │
     ▼
-镜像：sinozo-prod/ad-gateway:R1a2b3c4d（layer 完全一样）
+镜像：sinozo/ad-gateway:R<40位Git SHA>（同一不可变 tag）
     │
-    ├── 部署到 prod（helm upgrade）
+    ├── 部署到 prod（kubectl apply）
 ```
 
 ### 7.2 为什么不每个环境都构建一次？
@@ -269,7 +264,7 @@ Image Promotion：docker pull → docker tag → docker push
 | 依赖版本漂移 | test 构建时依赖 A v1.0，prod 构建时变成 v1.1 |
 | 浪费构建时间 | prod 部署多等 5 分钟构建 |
 
-**Image Promotion 保证：prod 跑的代码和 test 验证过的一模一样。**
+**不可变完整 SHA tag 保证：prod 跑的代码和 test 验证过的一模一样。**
 
 ---
 
@@ -283,15 +278,15 @@ Git push → Webhook → Jenkins 触发
     │
     ▼
 Jenkins Pipeline 执行：
-├── 1. 权限检查（prod 需要白名单）
-├── 2. 自动 clone 运维仓库（baselines/ + charts/）
-├── 3. 计算镜像 tag：R{commit短哈希}
-├── 4. 检查镜像是否已存在 → 不存在才构建
-├── 5. 构建镜像（Maven + Docker build + push）
-├── 6. Image Promotion（prod 部署时）
-├── 7. 解析 values 文件链（5 层合并）
-├── 8. helm upgrade --install（自动创建 namespace）
-├── 9. 健康检查（rollout status）
+├── 1. 校验 Job 环境、用户权限和生产分支
+├── 2. 固定业务仓库 commit（prod 使用 PROD_BRANCH）
+├── 3. 计算镜像 tag：R<40位Git SHA>
+├── 4. 非生产按需构建；生产只复用已验证镜像
+├── 5. 合并 Kustomize base 与目标 overlay
+├── 6. 注入镜像、namespace 和追溯注解
+├── 7. 对源文件和渲染 manifest 执行密钥校验
+├── 8. prod 先 diff，再由审批人确认
+├── 9. kubectl apply + rollout status
 └── 10. 部署成功
     │
     ▼
@@ -302,19 +297,16 @@ K8s 自动管理：
 └── 日志监控自动采集
 ```
 
-### 8.1 values 文件合并顺序（5 层覆盖）
+### 8.1 Kustomize 配置来源
 
 ```
-① charts/generic-service/values.yaml      （Chart 默认值，最低优先级）
-② baselines/_global.yaml                  （全局基线，运维管）
-③ baselines/projects/<proj>/_overrides.yaml（项目级覆盖，可选）
-④ deploy/values.yaml                      （业务通用，开发管）
-⑤ deploy/values-test.yaml 或              （test：开发管）
-   baselines/projects/<proj>/<svc>/values-prod.yaml（prod：运维管）
-⑥ --set image.tag / image.name ...        （CI 注入，最高优先级）
+① 业务仓库 deploy/kustomize/base                         （公共工作负载）
+② 业务仓库 deploy/kustomize/overlays/test            （测试）
+③ 业务仓库 deploy/kustomize/overlays/prod（生产，受保护分支）
+④ CI 临时注入镜像、namespace 和 Git 追溯注解
 ```
 
-后面的覆盖前面的，所以开发在 `values-test.yaml` 写的值会覆盖全局基线的默认值。
+test/prod 都读取业务 overlay；prod 只读取管理员指定的受保护 `PROD_BRANCH`，两者复用同一业务 base。
 
 ### 8.2 字段所有权（谁能改什么）
 
@@ -322,8 +314,8 @@ K8s 自动管理：
 |---------|-------|------|----------|
 | 镜像 tag / 镜像名 / namespace | CI 自动注入 | 不需要写 | ❌ |
 | registry / pullSecret / 全局策略 | 运维 | `baselines/_global.yaml` | ❌ |
-| test 配置（副本数、资源、JVM、探针） | 开发 | `deploy/values-test.yaml` | ✅ |
-| prod 配置 | 运维 | 运维仓库 `baselines/projects/` | ❌ 无 push 权限 |
+| test 配置（副本数、资源、JVM、探针） | 开发 | `deploy/kustomize/overlays/test` | ✅ |
+| prod 配置 | 运维 review | `deploy/kustomize/overlays/prod` 的受保护 `PROD_BRANCH` | ❌ 无直接 push 权限 |
 
 ---
 
@@ -332,7 +324,7 @@ K8s 自动管理：
 | 指标 | 传统部署 | 容器化 + CI/CD | 提升 |
 |------|---------|---------------|------|
 | 单次部署时间 | 10-30 分钟 | 1-2 分钟 | **10x** |
-| 回滚时间 | 10 分钟（找 jar + 重启） | 30 秒（helm rollback） | **20x** |
+| 回滚时间 | 10 分钟（找 jar + 重启） | 约 30 秒（rollout undo） | **20x** |
 | 扩容时间 | 半天（买机器 + 部署） | 30 秒（改 replicas） | **100x** |
 | 故障恢复时间 | 人工介入（分钟级） | 自动重启（秒级） | **60x** |
 | 运维人力（10 个服务） | 1 人全职 | 0.3 人 | **3x** |
@@ -344,6 +336,6 @@ K8s 自动管理：
 
 | 角色 | 文档 |
 |------|------|
-| 开发人员 | [开发接入指南](./开发接入指南.md) |
-| 运维人员 | [运维操作指南](./运维操作指南.md) |
-| 所有人 | [变量外置规范](./变量外置规范.md) |
+| 开发人员 | [开发接入指南](./02-开发接入指南.md) |
+| 运维人员 | [运维操作指南](./06-运维操作指南.md) |
+| 所有人 | [变量外置规范](./05-变量外置规范.md) |

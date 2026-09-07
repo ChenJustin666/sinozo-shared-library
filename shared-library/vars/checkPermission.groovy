@@ -17,10 +17,12 @@ def call(String deployEnv) {
     }
 
     // ── prod 环境，检查白名单 ──
-    // 默认白名单（admin + 当前运维 shengqun）
-    // 真生产把 DEVOPS_USERS 改全 → Manage Jenkins → System → Global properties → Environment variables
     def currentUser = getCurrentUser()
-    def devopsUsers = (env.DEVOPS_USERS ?: 'admin,shengqun')
+    def configuredUsers = env.DEVOPS_USERS?.trim()
+    if (!configuredUsers) {
+        error '未配置 Jenkins 全局环境变量 DEVOPS_USERS，生产操作默认拒绝'
+    }
+    def devopsUsers = configuredUsers
                        .split(',')
                        .collect { it.trim() }
                        .findAll { it }

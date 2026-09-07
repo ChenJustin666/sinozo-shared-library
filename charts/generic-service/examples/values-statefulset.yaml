@@ -27,7 +27,7 @@ service:
 # ── 镜像（所有防关联实例共用同一个镜像）──
 image:
   registry: swr.ap-southeast-3.myhuaweicloud.com
-  name: sinozo-prod/fcm-push        # 同一个 JAR 包
+  name: sinozo/fcm-push             # 同一个 JAR 包
   tag: latest                        # Jenkins 构建时覆盖
   pullSecret: regcred
 
@@ -39,12 +39,22 @@ java:
     -Dspring.profiles.active=prod
     -Dspring.cloud.nacos.config.server-addr=nacos.internal:8848
     -Dspring.cloud.nacos.config.namespace=fc06-gcp
-    -Dspring.cloud.nacos.config.username=nacos
-    -Dspring.cloud.nacos.config.password=nacos123
     -Dspring.cloud.nacos.config.file-extension=properties
     -Dspring.cloud.nacos.discovery.server-addr=nacos.internal:8848
     -Dspring.cloud.nacos.discovery.namespace=fc06-gcp
     -Xms1g -Xmx2g
+
+env:
+  - name: NACOS_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: nacos-auth-secret
+        key: NACOS_USERNAME
+  - name: NACOS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: nacos-auth-secret
+        key: NACOS_PASSWORD
 
 # ── 资源 ──
 resources:

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">
+
+  <!-- 本地仓库 -->
+  <localRepository>/var/lib/jenkins/.m2/repository/</localRepository>
+
+  <pluginGroups>
+    <!-- 插件组，可以根据需要配置 -->
+  </pluginGroups>
+
+  <proxies>
+    <!-- 如果有代理配置，添加在这里 -->
+  </proxies>
+
+  <servers>
+    <server>
+      <id>nexus-releases</id>
+      <username>admin</username>
+      <password>BHAgKVGSGTzg82!</password>
+    </server>
+    <server>
+      <id>nexus-snapshots</id>
+      <username>admin</username>
+      <password>BHAgKVGSGTzg82!</password>
+    </server>
+    <server>
+      <id>nexus-public</id>
+      <username>admin</username>
+      <password>BHAgKVGSGTzg82!</password>
+    </server>
+  </servers>
+
+  <mirrors>
+    <mirror>
+      <id>nexus-releases</id>
+      <mirrorOf>releases</mirrorOf>
+      <url>http://43.128.37.93:8081/repository/maven_release/</url>
+    </mirror>
+    <mirror>
+      <id>nexus-snapshots</id>
+      <mirrorOf>snapshots</mirrorOf>
+      <url>http://43.128.37.93:8081/repository/maven_snapshot/</url>
+    </mirror>
+    <mirror>
+      <id>nexus-public</id>
+      <mirrorOf>*</mirrorOf>
+      <url>http://43.128.37.93:8081/repository/maven_public/</url>
+    </mirror>
+  </mirrors>
+
+  <profiles>
+    <profile>
+      <id>nexus-releases</id>
+      <repositories>
+        <repository>
+          <id>nexus-releases</id>
+          <url>http://43.128.37.93:8081/repository/maven_release/</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+            <updatePolicy>always</updatePolicy>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+
+    <profile>
+      <id>nexus-snapshots</id>
+      <repositories>
+        <repository>
+          <id>nexus-snapshots</id>
+          <url>http://43.128.37.93:8081/repository/maven_snapshot/</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+            <updatePolicy>always</updatePolicy>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+
+    <profile>
+      <id>nexus-public</id>
+      <repositories>
+        <repository>
+          <id>nexus-public</id>
+          <url>http://43.128.37.93:8081/repository/maven_public/</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>true</enabled>
+            <updatePolicy>always</updatePolicy>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+
+    <!-- JDK 1.8 配置 -->
+    <profile>
+      <id>jdk-1.8</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+        <jdk>1.8</jdk>
+      </activation>
+      <properties>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <maven.compiler.compilerVersion>1.8</maven.compiler.compilerVersion>
+      </properties>
+    </profile>
+
+    <!-- Maven Central 配置 -->
+    <profile>
+      <id>maven-central</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases>
+            <enabled>true</enabled>
+          </releases>
+          <snapshots>
+            <enabled>false</enabled>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+
+  <activeProfiles>
+    <activeProfile>nexus-releases</activeProfile>
+    <activeProfile>nexus-snapshots</activeProfile>
+    <activeProfile>nexus-public</activeProfile>
+    <activeProfile>maven-central</activeProfile>
+    <activeProfile>jdk-1.8</activeProfile>
+  </activeProfiles>
+
+</settings>

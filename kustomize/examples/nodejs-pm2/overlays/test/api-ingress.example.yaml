@@ -1,0 +1,23 @@
+# 可选示例：前端域名下 /api 转发到 Java gateway。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: SERVICE_NAME-api
+  annotations:
+    alb.ingress.kubernetes.io/use-regex: "true"
+    alb.ingress.kubernetes.io/rewrite-target: /${2}
+    alb.ingress.kubernetes.io/order: "1"
+    alb.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: alb
+  rules:
+    - host: SERVICE_NAME.test.example.com
+      http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: ad-gateway-svc
+                port:
+                  number: 8080

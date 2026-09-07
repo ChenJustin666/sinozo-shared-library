@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# Java 8 多阶段构建 Dockerfile（简化版 - 无需 settings.xml）
+# 构建方式：Docker内完整构建，Jenkins只负责 docker build
+# Maven缓存：使用BuildKit cache mount持久化
+# 基础镜像：使用已烘焙私服配置的定制镜像
+# 使用方式：复制到业务仓库根目录，重命名为 Dockerfile
+# 要求：1) pom.xml 配置 <finalName>app</finalName>
+#       2) Jenkins构建命令: DOCKER_BUILDKIT=1 docker build ...
+# 
+# ⚠️ 此模板使用定制基础镜像，私服配置已内置，无需额外配置
+# ============================================================
+
+FROM sinozo-registry.ap-southeast-1.cr.aliyuncs.com/platform/maven:3.6-jdk-8-sinozo AS builder
+
+WORKDIR /app
+
+# 依赖下载阶段（利用Docker layer cache + BuildKit cache mount）
+COPY pom.xml .
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn dependency:go-offline -B
+
+# 编译阶段
+COPY src ./src
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn clean package -DskipTests -B && \
+    mv target/*.jar target/app.jar
+
+# ============================================================
+# 运行阶段（精简镜像，只包含JRE和jar）
+# ============================================================
+FROM sinozo-registry.ap-southeast-1.cr.aliyuncs.com/platform/eclipse-temurin:8-jre-alpine
+
+RUN apk add --no-cache curl tzdata && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone && \
+    apk del tzdata && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /app
+
+COPY --from=builder /app/target/app.jar app.jar
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+ENV JAVA_OPTS="" \
+    JAVA_MODULE_OPTS="" \
+    TZ=Asia/Shanghai
+
+EXPOSE 8080
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS $JAVA_MODULE_OPTS -jar /app/app.jar"]

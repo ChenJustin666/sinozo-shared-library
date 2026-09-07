@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: SERVICE_NAME
+  annotations:
+    alb.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: alb
+  rules:
+    - host: SERVICE_NAME.test.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: SERVICE_NAME-svc
+                port:
+                  name: http

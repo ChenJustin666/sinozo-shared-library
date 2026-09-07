@@ -1,0 +1,19 @@
+# ============================================================
+# Maven JDK 8 基础镜像 with Sinozo settings.xml
+# 用途：烘焙私服配置，业务项目无需维护 settings.xml
+# 构建：docker build -f Dockerfile.maven-jdk8 -t sinozo-registry.ap-southeast-1.cr.aliyuncs.com/platform/maven:3.6-jdk-8-sinozo .
+# ============================================================
+FROM maven:3.6-jdk-8-alpine
+
+LABEL maintainer="devops@sinozo.com"
+LABEL description="Maven 3.6 + JDK 8 with Sinozo private repository settings"
+
+# 注入企业私服配置
+COPY settings.xml /root/.m2/settings.xml
+COPY settings.xml /usr/share/maven/conf/settings.xml
+
+# 验证配置文件
+RUN cat /root/.m2/settings.xml && \
+    echo "✅ Sinozo Maven settings.xml installed"
+
+WORKDIR /app

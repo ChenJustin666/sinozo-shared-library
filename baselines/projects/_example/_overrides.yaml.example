@@ -5,7 +5,7 @@
 # ============================================================
 #
 # 何时使用：
-#   - 项目走独立 SWR organization（不是全局 sinozo-test/sinozo-prod）
+#   - 项目确需独立 SWR organization（全局默认统一为 sinozo）
 #   - K8s namespace 历史命名不规范（不是 <project>-<env>）
 #   - 不同 region / pullSecret
 #
@@ -17,7 +17,7 @@ image:
   # 不同 region：覆盖全局 swr.ap-southeast-3
   # registry: swr.cn-north-4.myhuaweicloud.com
 
-  # 不同 SWR organization：覆盖全局 sinozo-test/sinozo-prod
+  # 不同 SWR organization：覆盖全局 sinozo（不隔离时不要配置）
   # 注意：写了 image.projects 会【整体覆盖】全局，所有环境都要写完整
   projects:
     dev:  pay-test

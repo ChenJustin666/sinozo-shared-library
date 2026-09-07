@@ -1,0 +1,19 @@
+# ============================================================
+# Maven JDK 17 基础镜像 with Sinozo settings.xml
+# 用途：烘焙私服配置，业务项目无需维护 settings.xml
+# 构建：docker build -f Dockerfile.maven-jdk17 -t sinozo-registry.ap-southeast-1.cr.aliyuncs.com/platform/maven:3.9-jdk-17-sinozo .
+# ============================================================
+FROM maven:3.9-eclipse-temurin-17-alpine
+
+LABEL maintainer="devops@sinozo.com"
+LABEL description="Maven 3.9 + JDK 17 with Sinozo private repository settings"
+
+# 注入企业私服配置
+COPY settings.xml /root/.m2/settings.xml
+COPY settings.xml /usr/share/maven/conf/settings.xml
+
+# 验证配置文件
+RUN cat /root/.m2/settings.xml && \
+    echo "✅ Sinozo Maven settings.xml installed"
+
+WORKDIR /app

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ============================================================
+Sinozo 企业 Maven 私服配置
+此配置将烘焙到基础镜像中，业务项目无需维护
+维护：运维团队
+更新后需要重新构建基础镜像
+============================================================ -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 
+          http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <!-- Maven私服镜像配置 -->
+  <mirrors>
+    <mirror>
+      <id>sinozo-nexus</id>
+      <mirrorOf>*</mirrorOf>
+      <!-- TODO: 替换为实际的私服地址 -->
+      <url>http://nexus.sinozo.internal/repository/maven-public/</url>
+      <blocked>false</blocked>
+    </mirror>
+  </mirrors>
+
+  <!-- 私服认证配置 -->
+  <servers>
+    <server>
+      <id>sinozo-nexus</id>
+      <!-- TODO: 替换为实际的私服账号（建议使用只读账号） -->
+      <username>readonly</username>
+      <password>your-password-here</password>
+    </server>
+  </servers>
+
+  <!-- 本地仓库路径 -->
+  <localRepository>/root/.m2/repository</localRepository>
+
+</settings>

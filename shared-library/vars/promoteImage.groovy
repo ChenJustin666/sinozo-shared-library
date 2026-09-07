@@ -1,8 +1,8 @@
 /**
- * Image Promotion - 镜像跨 project 流转
+ * Image Promotion - 镜像跨 organization 流转（默认同仓库时自动跳过）
  *
  * ═══ 用途 ═══
- * test/prod 用不同 SWR project（如 sinozo-test / sinozo-prod）时，
+ * 项目显式为 test/prod 配置不同 SWR organization 时，
  * prod 部署前要把 test project 的镜像"提升"到 prod project。
  *
  * ═══ 关键特性 ═══
@@ -13,9 +13,9 @@
  *
  * ═══ 参数 ═══
  * @param config       Pipeline 配置（含 dockerImage、dockerCredId、dockerRegistry）
- * @param srcProject   源 project（如 sinozo-test）
- * @param dstProject   目标 project（如 sinozo-prod）
- * @param tag          镜像 tag（如 R1a2b3c4d）
+ * @param srcProject   源 organization
+ * @param dstProject   目标 organization
+ * @param tag          镜像 tag（R<40位Git SHA>）
  *
  * ═══ 行业实践 ═══
  *   - Google Cloud Build: gcrane copy
@@ -45,18 +45,10 @@ def call(Map config, String srcProject, String dstProject, String tag) {
 ╚═══════════════════════════════════════════════════════════════
 """
 
-    withCredentials([usernamePassword(
-        credentialsId: config.dockerCredId,
-        usernameVariable: 'DOCKER_USER',
-        passwordVariable: 'DOCKER_PASS'
-    )]) {
-
-        // ── 1. 登录 registry（同一 registry，不同 project 共用账号）──
-        sh "docker login ${registry} -u \$DOCKER_USER -p \$DOCKER_PASS"
-
+    withDockerRegistry(config) {
         // ── 2. 幂等检查：如果 dst 已存在该 tag，直接跳过（节省时间）──
         def dstExists = sh(
-            script: "docker manifest inspect ${dstImage} >/dev/null 2>&1",
+            script: "docker manifest inspect '${dstImage}' >/dev/null 2>&1",
             returnStatus: true
         ) == 0
 
@@ -67,18 +59,18 @@ def call(Map config, String srcProject, String dstProject, String tag) {
 
         // ── 3. Pull source image ──
         echo "  ⬇️  docker pull ${srcImage}"
-        sh "docker pull ${srcImage}"
+        sh "docker pull '${srcImage}'"
 
         // ── 4. Retag（不重新构建，layer 完全复用）──
         echo "  🏷️  docker tag ${srcImage} → ${dstImage}"
-        sh "docker tag ${srcImage} ${dstImage}"
+        sh "docker tag '${srcImage}' '${dstImage}'"
 
         // ── 5. Push to destination ──
         echo "  ⬆️  docker push ${dstImage}"
-        sh "docker push ${dstImage}"
+        sh "docker push '${dstImage}'"
 
         // ── 6. 清理本地（节省 Jenkins 节点磁盘）──
-        sh "docker rmi ${srcImage} ${dstImage} 2>/dev/null || true"
+        sh "docker rmi '${srcImage}' '${dstImage}' 2>/dev/null || true"
     }
 
     echo "✅ Image promotion 完成: ${dstImage}"

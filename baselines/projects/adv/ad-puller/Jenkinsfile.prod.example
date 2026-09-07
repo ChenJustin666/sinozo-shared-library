@@ -1,0 +1,14 @@
+@Library('k8s-deploy-lib@main') _
+
+k8sDeploy(
+    projectName:   'adv',
+    serviceName:   'ad-puller',
+    serviceType:   'java',
+    dockerImage:   'ad-puller',
+    dockerCredId:  'docker-swr-cred',
+    gitUrl:        '<business-repository-url>',
+    gitCredId:     '<business-git-credential-id>',
+    defaultBranch: 'master',
+    jdkTool:       'jdk 17',
+    // Monorepo: add subdirectory and, when needed, mavenGoals here.
+)

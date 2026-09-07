@@ -1,0 +1,38 @@
+# 可选示例：复制为 skywalking-patch.yaml 并加入 kustomization.yaml 的 patches。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: SERVICE_NAME
+spec:
+  template:
+    spec:
+      volumes:
+        - name: skywalking-agent
+          emptyDir: {}
+        - name: heapdump
+          emptyDir:
+            sizeLimit: 8Gi
+      initContainers:
+        - name: skywalking-agent
+          image: apache/skywalking-java-agent:9.5.0-alpine
+          command: ["sh", "-c", "cp -R /skywalking/agent/. /agent/"]
+          volumeMounts:
+            - name: skywalking-agent
+              mountPath: /agent
+      containers:
+        - name: app
+          volumeMounts:
+            - name: skywalking-agent
+              mountPath: /skywalking
+            - name: heapdump
+              mountPath: /dump
+          env:
+            - name: JAVA_OPTS
+              value: >-
+                -javaagent:/skywalking/skywalking-agent.jar
+                -Dskywalking.agent.service_name=SERVICE_NAME
+                -Dskywalking.collector.backend_service=skywalking-oap.skywalking.svc.cluster.local:11800
+                -XX:+UseContainerSupport
+                -XX:MaxRAMPercentage=60.0
+                -XX:+HeapDumpOnOutOfMemoryError
+                -XX:HeapDumpPath=/dump/heapdump.hprof

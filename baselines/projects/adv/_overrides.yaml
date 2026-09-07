@@ -1,7 +1,7 @@
 
 # ── 镜像基础设施 ────────────────────────────────────────────
-# 多 project 隔离：dev/test 和 prod 用不同的 SWR organization
+# adv 当前所有环境共用 sinozo organization。
 image:
   projects:
-    test: sinozo-test
-    prod: adv-prod
+    test: sinozo
+    prod: sinozo

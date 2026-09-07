@@ -1,53 +1,23 @@
 # ============================================================
 # 全局基线 (baselines/_global.yaml)
 # ============================================================
-# 范围：所有服务部署时必加载
+# 范围：CI 读取镜像仓库与环境 project 映射
 # Owner：运维 / 平台组
 # Review：季度
 # ============================================================
 
 # ── 镜像基础设施 ────────────────────────────────────────────
-# 多 project 隔离：dev/test 和 prod 用不同的 SWR organization
+# 默认单 organization；项目可在 _overrides.yaml 按需隔离。
 image:
   registry: swr.ap-southeast-3.myhuaweicloud.com
 
   # 镜像 organization（华为云 SWR 的 project）映射
   # key = DEPLOY_ENV, value = SWR 上的 organization 名
-  # ⚠️ dev 和 test 必须用同一个 organization（否则 test 找不到 dev 构建的镜像）
+  # 默认所有环境共用同一个 organization，通过不可变 tag 保证镜像一致。
   projects:
-    dev:  sinozo-test
-    test: sinozo-test
-    prod: sinozo-prod
+    test: sinozo
+    prod: sinozo
 
-  # K8s ImagePullSecret 名（每个 namespace 自动创建）
+  # K8s ImagePullSecret 名（共享库当前固定使用 regcred）
   pullSecret: regcred
   pullPolicy: IfNotPresent
-
-# ── 容器安全（默认不强制）──────────────────────────────────
-# 默认容器以镜像里的 USER 跑（老服务大多是 root）。
-# 想强制非 root 时，在【运维仓库 baselines/projects/<svc>/values-prod.yaml】或
-#                  【业务仓库 deploy/values-test.yaml】添加：
-#   securityContext:
-#     runAsUser: 1000
-#     runAsGroup: 1000
-#     fsGroup: 1000
-# 前提：镜像中 /data/apps/<svc> 等业务目录的 owner 是 1000:1000，
-#       否则会因写文件权限不足导致 pod CrashLoopBackOff。
-securityContext: {}
-
-
-# ── 部署策略（零停机）───────────────────────────────────────
-strategy:
-  type: RollingUpdate
-  rollingUpdate:
-    maxSurge: 1
-    maxUnavailable: 0
-
-# ── 资源默认值 ─────────────────────────────────────────────
-# 设计：requests 默认极低（够启动就行），具体值开发在业务 values 里写
-# limits 由 Helm Chart 默认值兜底（charts/generic-service/values.yaml）
-resources:
-  enabled: true
-  requests:
-    cpu: 100m
-    memory: 256Mi

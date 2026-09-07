@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: SERVICE_NAME
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: NODE_ENV
+              value: test
+            - name: PORT
+              value: "8080"

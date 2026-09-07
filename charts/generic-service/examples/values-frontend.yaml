@@ -20,7 +20,7 @@ service:
 # ── 镜像 ──
 image:
   registry: swr.ap-southeast-3.myhuaweicloud.com
-  name: sinozo-test/ad-reactad
+  name: sinozo/ad-reactad
   tag: latest
   pullSecret: regcred
 
